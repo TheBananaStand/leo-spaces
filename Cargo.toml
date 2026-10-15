@@ -15,6 +15,14 @@ axum = { version = "0.8", features = ["ws", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "sync", "fs", "net", "io-util", "io-std"] }
 tower-http = { version = "0.6", features = ["trace"] }
 
+# Response parsing for the one HTTP call this makes — see config.rs, which
+# asks the hub for the settings a fixed-port app package is never handed. No
+# client crate: axum locks hyper's *server* half, its client half wants a
+# connection pool and two more crates for a single loopback GET at startup,
+# and a TLS stack would be dead weight for 127.0.0.1. So the request is
+# written out and `httparse` (already in the tree, via hyper) reads the reply.
+httparse = "1"
+
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

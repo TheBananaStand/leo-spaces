@@ -3,8 +3,8 @@
 Run whole machines on a Leo hub. Install the hypervisor, create Windows and
 Linux guests, and hand one of them a GPU outright.
 
-A Leo **dynamic app package**: the hub builds this binary from git and runs it
-as a proxied subprocess. Leo itself is never recompiled.
+A Leo **app package**: the hub builds this binary from git and runs it as a
+proxied subprocess. Leo itself is never recompiled.
 
 ```
 Leo (Mac / iOS)  ──/p/spaces/──►  leo-spaces  ──►  libvirt / KVM  ──►  guests
@@ -33,9 +33,6 @@ leo packages install descriptor.json \
   --enabled
 ```
 
-Leave the **Host** setting blank to virtualise on the hub itself. Set it to a
-hostname to drive a separate Leo compute machine over SSH.
-
 Then, once, as root on that box:
 
 ```bash
@@ -44,6 +41,21 @@ sudo bash scripts/install-admin-wrapper.sh
 
 That is the one step this package cannot take for itself, and the next section
 is why.
+
+Leave the **Host** setting blank to virtualise on the hub itself — which needs
+nothing further. To drive a separate Leo compute machine over SSH, the four
+`spaces_*` settings have to reach this process, and on a fixed port they do not
+arrive in its environment (see *How it runs*). So mint it a token for its own
+settings and install that too:
+
+```bash
+leo packages token mint spaces --scope settings:read --label spaces > /tmp/t
+sudo bash scripts/install-admin-wrapper.sh --token /tmp/t && shred -u /tmp/t
+```
+
+The token reaches exactly the four keys `entitlements.settings_read` declares,
+because that is what the hub answers `GET /graph/v1/settings` from — the mint
+adds no keys of its own.
 
 ## Root, and why there is a wrapper
 
@@ -147,14 +159,17 @@ the machines" and "may change how the box boots" are different grants.
 somebody's work on it is not deleted as a side effect of removing a VM
 definition.
 
-## The UI, and why the tools are the real surface
+## How it runs: a fixed port, and why
 
 A descriptor, not a web bundle: `GET /leo/ui/descriptor` returns a tree the Mac
-and iOS clients render natively. `GET /leo/ui/data` is everything live.
+and iOS clients render natively. `GET /leo/ui/data` is everything live. Both
+are served by this binary, which the hub builds from git and proxies
+`/p/spaces/*` to.
 
-**It cannot run as a dynamic app package, and that is not a bug in it.** The hub
-jails an app package's HTTP process with bubblewrap. Confirmed by running the
-hub's own confinement argv:
+`app.port` in the descriptor is **8530 and not 0**, and that single field is
+what decides whether any of it can work. The hub's `spawn_app` reads a zero
+port as *dynamic*, and a dynamic app package is jailed with bubblewrap.
+Confirmed by running the hub's own confinement argv:
 
 ```
 $ bwrap <the hub's flags> -- ls /run /var /etc/libvirt
@@ -163,20 +178,48 @@ ls: cannot access '/var': No such file or directory
 ls: cannot access '/etc/libvirt': No such file or directory
 ```
 
-Only `/usr`, a short allowlist of `/etc` files, `/proc`, `/dev`, a tmpfs `/tmp`,
-the install directory and the package's own data directory are mounted — plus a
-private network namespace. `virsh` is visible under `/usr/bin` and the socket it
-needs at `/run/libvirt/libvirt-sock` is not, so a jailed process can never reach
-libvirtd. The jail is right; a hypervisor manager is simply not the kind of
-thing it is built to contain.
+Only `/usr`, a short allowlist of `/etc` files, `/proc`, `/dev`, a tmpfs
+`/tmp`, the install directory and the package's own data directory are mounted
+— plus a private network namespace. `virsh` is visible under `/usr/bin` and
+the socket it needs at `/run/libvirt/libvirt-sock` is not, so a jailed process
+can never reach libvirtd. The jail is right; a hypervisor manager is simply not
+the kind of thing it is built to contain.
 
-**The MCP server is not jailed.** The hub launches it as a plain subprocess, so
-`spaces` and `spaces_host` reach the host normally. That is the working control
-surface today, and everything in this package is reachable through it.
+A fixed port takes the other branch: the hub spawns the binary bare, as its own
+service account, with the filesystem the host actually has. That is the branch
+written for compiled-in apps like LeoCode, and it is the one this package
+belongs on — it manages the box it runs on, which is the opposite of what the
+jail is for.
 
-The descriptor is kept, tested and correct, for the two ways it becomes
-renderable: as a compiled in-tree package on a hub with a checkout, or if the
-hub ever grows an entitlement for an app that manages its own host.
+**What the fixed port costs.** `dynamic` gates more in `spawn_app` than the
+sandbox, and every one of these is paid here rather than worked around:
+
+| Lost | Consequence, and what this package does |
+|---|---|
+| Entitled settings in the environment | The four `spaces_*` keys never arrive. `config.rs` reads them back from `GET /graph/v1/settings` with a package token — the environment still wins where both have a value. |
+| `LEO_APP_PORT` | Nothing tells the process which port to bind, so its own default **is** the contract. `the_declared_port_is_the_one_this_binary_binds` asserts the descriptor and the binary agree. |
+| stdout and stderr | Both go to `/dev/null` — not to the journal either, since the hub is the parent. So this opens the hub's own `apps/spaces/logs/app.log` itself, and the Studio's log pane keeps working. |
+| The egress jail | No private netns, so `entitlements.network` is advisory rather than enforced. It still declares the one host this reaches (`fedorapeople.org`, for the virtio ISO). |
+| Crash accounting | `handle_app_crash` is dynamic-only; a crash loop is visible in the hub's log rather than tracked. |
+
+One wrinkle worth knowing: the hub *adopts* whatever is already serving the
+declared port rather than starting a second copy, so another process on 8530
+would be proxied as if it were this one.
+
+**The route not taken.** `leo packages service provision` looks like the right
+home for this — its own `leo-pkg-spaces` account, a real unit, journal logs —
+and the unit it generates cannot run this package. It sets
+`NoNewPrivileges=yes`, which stops `sudo` from elevating, and the privileged
+half of this package *is* one sudoers rule onto one root-owned wrapper. Under
+that unit Spaces could manage guests and never set a host up: every Host setup
+button would report the command for a human to run. `ProtectSystem=strict` says
+the same thing in a second way. That hardening is correct for what it was
+written for — a package that holds nothing and talks only to the hub — and this
+is not that.
+
+**The MCP server is not jailed either.** The hub launches it as a plain
+subprocess, and it does get entitled settings in its environment, so `spaces`
+and `spaces_host` work whatever the HTTP half is doing.
 
 Every mistake in a descriptor is silent — an unknown `kind` renders nothing, an
 unknown `style` falls back to body text, an unseeded `stateKey` reads as `""`
@@ -190,7 +233,7 @@ serves.
 
 ```bash
 cargo build --release     # → target/release/leo-spaces
-cargo test                # 79 tests, no hypervisor needed
+cargo test                # 84 tests, no hypervisor needed
 ```
 
 The tests run without libvirt, without root and without a guest. They cover the
@@ -233,9 +276,10 @@ guards against something genuinely running away.
   vGPU support, so several GPU-backed guests means several cards. Parallelism
   *within* one guest, via sessions, is not subject to this — and most solver
   work is CPU-bound anyway.
-- **No native page yet**, for the sandbox reason above — the tools are the
-  surface. The descriptor is written, grammar-checked and ready for whichever
-  of the two homes it ends up in.
+- **The page needs the fixed port to stay fixed.** Set `app.port` back to 0 and
+  the descriptor still validates, the package still installs, the tools still
+  work — and the page comes up jailed, reporting a machine with no `/run` and
+  no libvirt. `cargo test` is what notices.
 - **No console yet.** Guests get a VNC display on the host's loopback (VNC
   rather than SPICE because guacd cannot bridge SPICE). Wiring that to an
   authenticated tunnel is the next piece.

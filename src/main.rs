@@ -1,9 +1,16 @@
 //! leo-spaces — a hypervisor for Leo hubs and Leo compute machines, and full
 //! control of the guests from inside Leo.
 //!
-//! A Leo *dynamic app package*: the hub builds this binary from git, runs it as
-//! a proxied subprocess, and forwards `/p/spaces/*` to it. Leo itself is never
-//! recompiled.
+//! A Leo *app package*: the hub builds this binary from git and forwards
+//! `/p/spaces/*` to it. Leo itself is never recompiled.
+//!
+//! It declares a **fixed port**, which is what decides how it runs. The hub
+//! bubblewrap-jails a dynamic-port (`port: 0`) app package — a namespace with
+//! no `/run`, so no `/run/libvirt/libvirt-sock`, so no hypervisor at all — and
+//! spawns a fixed-port one bare. A fixed port is therefore not a configuration
+//! detail here but the whole reason the HTTP half can work; the cost is that
+//! the hub hands a fixed-port app no settings, no data dir and no port, which
+//! is what `config.rs` deals with and why the unit carries a package token.
 //!
 //! ## What it does, in layers
 //!
@@ -25,10 +32,11 @@
 //! `leo-spaces start` — the HTTP server (the default when no argument is given)
 //! `leo-spaces mcp`   — speak MCP over stdio instead
 //!
-//! Both read the same settings from the same env vars. They share one binary
-//! because the hub launches an MCP subprocess with only entitled settings in
-//! its environment — not the app's hub-assigned port — so a separate MCP
-//! server could not find the HTTP one to call it.
+//! They share one binary because the hub launches an MCP subprocess with only
+//! entitled settings in its environment — not the app's port — so a separate
+//! MCP server could not find the HTTP one to call it. The MCP side does get
+//! those settings in its environment, where the app side has to ask for them;
+//! `config.rs` takes either, so both modes agree on which host they drive.
 
 use std::sync::Arc;
 
@@ -69,26 +77,91 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Where the hub's Studio log pane reads an app package's output from, and so
+/// where this writes it.
+///
+/// The hub pipes a *dynamic*-port app's stdout and stderr into
+/// `{data_dir}/apps/<name>/logs/app.log` and sends a fixed-port one's to
+/// `/dev/null` — nothing in the journal either, because the hub is the parent
+/// and it discards both streams. A hypervisor manager whose whole job is
+/// reporting what a box is, with no log anywhere, is not debuggable, so this
+/// opens that same file itself: the pane keeps working and the path stays the
+/// one place to look.
+///
+/// Derived from the running binary (`…/apps/spaces/src/target/release/…`)
+/// rather than from `LEO_DATA_DIR`, which is part of the hand-off a fixed-port
+/// app does not get. `LEO_SPACES_LOG` overrides, and a by-hand run that
+/// matches neither simply logs to stderr.
+fn log_file() -> Option<std::fs::File> {
+    let path = match std::env::var("LEO_SPACES_LOG").ok().filter(|v| !v.is_empty()) {
+        Some(p) => std::path::PathBuf::from(p),
+        None => {
+            let exe = std::env::current_exe().ok()?;
+            // …/apps/<name>/src/target/release/leo-spaces → …/apps/<name>
+            let app_dir = exe
+                .ancestors()
+                .find(|a| a.file_name().is_some_and(|n| n == "src"))
+                .and_then(|src| src.parent())
+                .filter(|app| {
+                    app.parent()
+                        .and_then(|p| p.file_name())
+                        .is_some_and(|n| n == "apps")
+                })?;
+            app_dir.join("logs").join("app.log")
+        }
+    };
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    // Truncated per launch, as the hub does it, so it stays bounded without a
+    // rotation story.
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)
+        .ok()
+}
+
 #[tokio::main]
 async fn main() {
-    // stderr in both modes: in MCP mode the host reads stdout as protocol, and
-    // a log line there corrupts the stream.
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("leo_spaces=info,warn")),
-        )
-        .init();
+    // Never stdout: in MCP mode the host reads it as protocol and a log line
+    // there corrupts the stream. stderr, plus the hub's own app.log when this
+    // is running as the installed app package — see `log_file`.
+    let to_file = match std::env::args().nth(1).as_deref() {
+        // MCP mode is a subprocess of the hub with its stderr attached, so it
+        // is already visible; a second writer would only split the record.
+        Some("mcp") => None,
+        _ => log_file(),
+    };
+    let filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("leo_spaces=info,warn"))
+    };
+    match to_file {
+        Some(f) => tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || -> Box<dyn std::io::Write> {
+                match f.try_clone() {
+                    Ok(f) => Box::new(f),
+                    Err(_) => Box::new(std::io::stderr()),
+                }
+            })
+            .with_env_filter(filter())
+            .init(),
+        None => tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_env_filter(filter())
+            .init(),
+    }
 
-    let cfg = Arc::new(config::Config::from_env());
+    let cfg = Arc::new(config::Config::load().await);
 
     match std::env::args().nth(1).as_deref() {
         Some("mcp") => {
             eprintln!("leo-spaces: MCP stdio mode, host {}", cfg.host);
             mcp::run(cfg).await;
         }
-        // The hub spawns app packages as `<binary> start`. Accept it, and run
+        // The hub spawns app packages as `<binary> start`, and so does the
+        // unit `leo packages service provision` writes. Accept it, and run
         // when invoked bare too, so this is testable by hand.
         _ => serve(cfg).await,
     }
