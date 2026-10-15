@@ -15,6 +15,25 @@
 //! grammar the two renderers actually implement
 //! (`crates/leo-package/src/ui/validate.rs`). An unknown kind renders as
 //! nothing at all, silently, so nothing is invented.
+//!
+//! ## This does not render as a dynamic app package, and cannot
+//!
+//! The hub jails an app package's HTTP process with bubblewrap: `/usr`, a few
+//! `/etc` files, `/proc`, `/dev`, a tmpfs `/tmp`, the install dir and the data
+//! dir — and a private network namespace. There is no `/run` and no `/var`, so
+//! `/run/libvirt/libvirt-sock` does not exist inside it and `virsh` can never
+//! reach libvirtd, however many times it is on `$PATH`. `data()` below would
+//! answer every request with an unreachable host.
+//!
+//! The jail is correct. A package that manages the machine it runs on is not
+//! what it is built to contain, and widening it for this one package would
+//! widen it for every package.
+//!
+//! So the live surface is `mcp.rs`, which the hub launches **unjailed**. This
+//! module is kept whole and under test because the descriptor is right and the
+//! grammar check is worth keeping green — it becomes renderable the day this
+//! ships as a compiled in-tree package, or the day the hub distinguishes an
+//! app that manages its host from one that merely runs on it.
 
 use axum::extract::{Query, State};
 use axum::Json;

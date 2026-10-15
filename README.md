@@ -147,10 +147,36 @@ the machines" and "may change how the box boots" are different grants.
 somebody's work on it is not deleted as a side effect of removing a VM
 definition.
 
-## The UI
+## The UI, and why the tools are the real surface
 
 A descriptor, not a web bundle: `GET /leo/ui/descriptor` returns a tree the Mac
 and iOS clients render natively. `GET /leo/ui/data` is everything live.
+
+**It cannot run as a dynamic app package, and that is not a bug in it.** The hub
+jails an app package's HTTP process with bubblewrap. Confirmed by running the
+hub's own confinement argv:
+
+```
+$ bwrap <the hub's flags> -- ls /run /var /etc/libvirt
+ls: cannot access '/run': No such file or directory
+ls: cannot access '/var': No such file or directory
+ls: cannot access '/etc/libvirt': No such file or directory
+```
+
+Only `/usr`, a short allowlist of `/etc` files, `/proc`, `/dev`, a tmpfs `/tmp`,
+the install directory and the package's own data directory are mounted — plus a
+private network namespace. `virsh` is visible under `/usr/bin` and the socket it
+needs at `/run/libvirt/libvirt-sock` is not, so a jailed process can never reach
+libvirtd. The jail is right; a hypervisor manager is simply not the kind of
+thing it is built to contain.
+
+**The MCP server is not jailed.** The hub launches it as a plain subprocess, so
+`spaces` and `spaces_host` reach the host normally. That is the working control
+surface today, and everything in this package is reachable through it.
+
+The descriptor is kept, tested and correct, for the two ways it becomes
+renderable: as a compiled in-tree package on a hub with a checkout, or if the
+hub ever grows an entitlement for an app that manages its own host.
 
 Every mistake in a descriptor is silent — an unknown `kind` renders nothing, an
 unknown `style` falls back to body text, an unseeded `stateKey` reads as `""`
@@ -207,6 +233,9 @@ guards against something genuinely running away.
   vGPU support, so several GPU-backed guests means several cards. Parallelism
   *within* one guest, via sessions, is not subject to this — and most solver
   work is CPU-bound anyway.
+- **No native page yet**, for the sandbox reason above — the tools are the
+  surface. The descriptor is written, grammar-checked and ready for whichever
+  of the two homes it ends up in.
 - **No console yet.** Guests get a VNC display on the host's loopback (VNC
   rather than SPICE because guacd cannot bridge SPICE). Wiring that to an
   authenticated tunnel is the next piece.
