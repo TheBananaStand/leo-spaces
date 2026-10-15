@@ -1,0 +1,90 @@
+{
+  "name": "spaces",
+  "label": "Spaces",
+  "description": "Run whole machines on a Leo hub \u2014 install the hypervisor, create Windows and Linux guests, and hand one a GPU.",
+  "details": "Turns a Leo hub or compute machine into a hypervisor, then runs guests on it. The Host setup tab reports what the box is \u2014 distribution, CPU, IOMMU, graphics devices, whether anything can be isolated for a guest \u2014 and derives the remaining steps fresh on every load, so a step that became true disappears. Guests are KVM/QEMU domains managed through libvirt: define one, start it, snapshot it, assign it a GPU exclusively. Windows guests get UEFI firmware, a software TPM and the virtio driver ISO without being asked, because all three are what a Windows install needs and the failures when they are missing look like broken storage. Everything privileged goes through one root-owned wrapper with a closed verb set; without it this package still reports and plans, and hands over the exact commands.",
+  "setup_hint": "Install it on the box you want to virtualise on and leave the host field blank. Then run scripts/install-admin-wrapper.sh once as root to let it apply its own setup steps.",
+  "use_cases": [
+    "Turn the work hub into a hypervisor without a console",
+    "Run Windows-only CAD and simulation software on Linux metal",
+    "Give one guest the GPU outright, and see why another cannot have it",
+    "Snapshot a machine before letting an agent loose on it"
+  ],
+  "icon": "macwindow.on.rectangle",
+  "category": "package",
+  "host_api": 1,
+  "kind": "app",
+  "app": {
+    "repo": "REPLACE_WITH_YOUR_GIT_URL",
+    "rev": null,
+    "branch": "main",
+    "build": "cargo build --release",
+    "bin": "target/release/leo-spaces",
+    "port": 0,
+    "webapp": false,
+    "base_path": true
+  },
+  "mcp_server": "spaces",
+  "fields": [
+    {
+      "key": "spaces_host",
+      "label": "Host",
+      "field_type": "text",
+      "required": false,
+      "options": null
+    },
+    {
+      "key": "spaces_ssh_user",
+      "label": "SSH user (remote host only)",
+      "field_type": "text",
+      "required": false,
+      "options": null
+    },
+    {
+      "key": "spaces_ssh_port",
+      "label": "SSH port (remote host only)",
+      "field_type": "number",
+      "required": false,
+      "options": null
+    },
+    {
+      "key": "spaces_ssh_key",
+      "label": "SSH key path (remote host only)",
+      "field_type": "text",
+      "required": false,
+      "options": null
+    }
+  ],
+  "pages": [
+    {
+      "path": "spaces",
+      "label": "Spaces",
+      "icon": "macwindow.on.rectangle",
+      "sidebar_group": "Workspace",
+      "settings_page": false,
+      "show_in_nav": true
+    }
+  ],
+  "owned_tables": [],
+  "table_prefixes": [],
+  "migrations": [],
+  "entitlements": {
+    "feed": false,
+    "push": false,
+    "settings_read": [
+      "spaces_host",
+      "spaces_ssh_user",
+      "spaces_ssh_port",
+      "spaces_ssh_key"
+    ],
+    "network": [
+      "fedorapeople.org"
+    ],
+    "sends": [],
+    "storage_mb": 10
+  },
+  "access": {
+    "mode": "admin_only"
+  },
+  "default_enabled": false
+}

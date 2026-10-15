@@ -1,0 +1,365 @@
+#!/usr/bin/env bash
+#
+# leo-spaces-admin — the whole privileged surface of the Spaces package.
+#
+# Installed root-owned at /usr/local/bin/leo-spaces-admin by
+# scripts/install-admin-wrapper.sh, which also writes the one sudoers rule
+# that permits it. The package calls nothing else with privilege.
+#
+# WHY A WRAPPER AND NOT SUDO. Hypervisor setup is root work: packages, units,
+# /etc/modprobe.d, the kernel command line. A Leo hub's service account
+# deliberately has no blanket sudo, and giving it one would make every bug in
+# this package a root bug. So the grant names ONE program with a CLOSED VERB
+# SET. Each verb below is a fixed sequence of commands; the only caller-
+# supplied value anywhere is a PCI id pair, and it is matched against a
+# regex before it reaches a file. There is no verb that takes a command.
+#
+# Re-running any verb is safe. They are written to converge, not to toggle,
+# because the package derives what is missing on every page load and an
+# operator will press the button twice.
+
+set -euo pipefail
+
+VERSION=1
+STATE_DIR=/var/lib/leo-spaces
+POOL=leo-spaces
+MODPROBE_CONF=/etc/modprobe.d/leo-spaces-vfio.conf
+VIRTIO_URL=https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso
+
+die() { printf 'leo-spaces-admin: %s\n' "$*" >&2; exit 1; }
+say() { printf '%s\n' "$*"; }
+
+[ "$(id -u)" = "0" ] || die "must run as root (it is meant to be reached through its sudoers rule)"
+
+# ── Which package manager, and the list for it ────────────────────────────────
+#
+# Duplicated from src/provision.rs on purpose. The wrapper has to work when
+# run by hand on a box with no hub — that is its recovery story — so it cannot
+# take the list as an argument without also accepting an argument that installs
+# anything at all.
+detect_pm() {
+  if command -v pacman  >/dev/null 2>&1; then echo pacman
+  elif command -v apt-get >/dev/null 2>&1; then echo apt
+  elif command -v dnf    >/dev/null 2>&1; then echo dnf
+  else echo unknown; fi
+}
+
+v_install_packages() {
+  case "$(detect_pm)" in
+    pacman)
+      pacman -S --needed --noconfirm \
+        qemu-full libvirt virt-install edk2-ovmf swtpm dnsmasq dmidecode
+      ;;
+    apt)
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get install -y \
+        qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients \
+        virtinst ovmf swtpm swtpm-tools dnsmasq-base dmidecode
+      ;;
+    dnf)
+      dnf install -y \
+        qemu-kvm libvirt virt-install edk2-ovmf swtpm swtpm-tools dnsmasq dmidecode
+      ;;
+    *) die "no supported package manager found" ;;
+  esac
+  say "packages installed"
+}
+
+# ── The daemon ────────────────────────────────────────────────────────────────
+#
+# Arch ships the monolithic libvirtd; Debian has moved to the modular daemons.
+# Try the monolithic socket first and fall back, because a host with either is
+# a working host and a script that knew only one would report a fine box broken.
+v_enable_daemon() {
+  local started=0
+  if systemctl list-unit-files libvirtd.socket >/dev/null 2>&1 \
+     && systemctl enable --now libvirtd.socket 2>/dev/null; then
+    started=1
+  elif systemctl enable --now virtqemud.socket virtnetworkd.socket virtstoraged.socket 2>/dev/null; then
+    started=1
+  fi
+  [ "$started" = "1" ] || die "could not enable libvirt — is it installed?"
+  # virtlogd captures guest serial output. Without it a guest that fails to
+  # boot does so with nothing written down anywhere.
+  systemctl enable --now virtlogd.socket 2>/dev/null || true
+  say "libvirt enabled"
+}
+
+virsh_sys() { virsh --connect qemu:///system "$@"; }
+
+# ── Guest networking ──────────────────────────────────────────────────────────
+v_setup_network() {
+  if ! virsh_sys net-info default >/dev/null 2>&1; then
+    local xml=""
+    for cand in /usr/share/libvirt/networks/default.xml \
+                /usr/share/doc/libvirt/examples/network/default.xml; do
+      [ -f "$cand" ] && xml="$cand" && break
+    done
+    if [ -n "$xml" ]; then
+      virsh_sys net-define "$xml"
+    else
+      # Some packagings ship no example. Define the same network by hand
+      # rather than leaving the host without one.
+      local tmp
+      tmp=$(mktemp)
+      cat > "$tmp" <<'XML'
+<network>
+  <name>default</name>
+  <forward mode='nat'/>
+  <bridge name='virbr0' stp='on' delay='0'/>
+  <ip address='192.168.122.1' netmask='255.255.255.0'>
+    <dhcp><range start='192.168.122.2' end='192.168.122.254'/></dhcp>
+  </ip>
+</network>
+XML
+      virsh_sys net-define "$tmp"
+      rm -f "$tmp"
+    fi
+  fi
+  virsh_sys net-autostart default >/dev/null
+  virsh_sys net-start default >/dev/null 2>&1 || true
+  virsh_sys net-info default | grep -qi '^Active:.*yes' \
+    || die "the default network is defined but will not start — check 'journalctl -u libvirtd'"
+  say "default network active"
+}
+
+# ── Storage ───────────────────────────────────────────────────────────────────
+v_setup_storage() {
+  mkdir -p "$STATE_DIR"/disks "$STATE_DIR"/iso "$STATE_DIR"/nvram
+  # qemu runs guests as its own user and has to write disks and firmware vars.
+  local qu=qemu
+  id -u qemu >/dev/null 2>&1 || qu=libvirt-qemu
+  if id -u "$qu" >/dev/null 2>&1; then
+    chown -R "$qu":"$qu" "$STATE_DIR"/disks "$STATE_DIR"/nvram
+  fi
+  chmod 0751 "$STATE_DIR"
+  if ! virsh_sys pool-info "$POOL" >/dev/null 2>&1; then
+    virsh_sys pool-define-as "$POOL" dir --target "$STATE_DIR/disks" >/dev/null
+  fi
+  virsh_sys pool-autostart "$POOL" >/dev/null
+  virsh_sys pool-start "$POOL" >/dev/null 2>&1 || true
+  say "storage pool $POOL ready at $STATE_DIR/disks"
+}
+
+# ── Group membership ──────────────────────────────────────────────────────────
+#
+# $SUDO_USER is the account that invoked us. Validated against the passwd
+# database rather than trusted: it arrives from the environment, and `usermod`
+# would take any string.
+v_add_group() {
+  local u="${SUDO_USER:-}"
+  [ -n "$u" ] || u=$(logname 2>/dev/null || true)
+  [ -n "$u" ] || die "cannot tell which account to add — run through sudo"
+  id -u "$u" >/dev/null 2>&1 || die "no such account: $u"
+  getent group libvirt >/dev/null || die "there is no libvirt group — install the packages first"
+  usermod -aG libvirt "$u"
+  say "added $u to libvirt (group membership is read at login — restart the hub service)"
+}
+
+# ── Windows virtio drivers ────────────────────────────────────────────────────
+v_fetch_virtio() {
+  mkdir -p "$STATE_DIR/iso"
+  local dest="$STATE_DIR/iso/virtio-win.iso"
+  if [ -s "$dest" ]; then
+    say "virtio-win.iso already present"
+    return
+  fi
+  command -v curl >/dev/null 2>&1 || die "curl is not installed"
+  curl -fsSL --retry 3 -o "$dest.part" "$VIRTIO_URL"
+  # An ISO that is actually an error page is worse than no ISO: Windows setup
+  # mounts it, finds no drivers, and the failure looks like broken storage.
+  if ! head -c 32776 "$dest.part" | tail -c 5 | grep -q CD001; then
+    rm -f "$dest.part"
+    die "what came back is not an ISO 9660 image — check the network entitlement"
+  fi
+  mv "$dest.part" "$dest"
+  say "virtio-win.iso downloaded to $dest"
+}
+
+# ── The kernel command line ───────────────────────────────────────────────────
+#
+# The one genuinely dangerous thing here, so: a backup first, every time, into
+# a timestamped directory; and the fallback/recovery entries are left alone, so
+# whatever else happens there is still an entry that boots the way it did
+# before. systemd-boot also lets you edit the command line at the menu with
+# 'e', which is the other way back.
+backup_dir() {
+  local d="$STATE_DIR/boot-backup-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$d"
+  echo "$d"
+}
+
+iommu_params() {
+  if grep -qm1 AuthenticAMD /proc/cpuinfo; then echo "amd_iommu=on iommu=pt"
+  elif grep -qm1 GenuineIntel /proc/cpuinfo; then echo "intel_iommu=on iommu=pt"
+  else echo "iommu=pt"; fi
+}
+
+v_enable_iommu() {
+  local params; params=$(iommu_params)
+  local bk; bk=$(backup_dir)
+
+  if [ -d /boot/loader/entries ] && command -v bootctl >/dev/null 2>&1; then
+    local touched=0
+    shopt -s nullglob
+    for entry in /boot/loader/entries/*.conf; do
+      case "$(basename "$entry")" in
+        *fallback*|*recovery*|*rescue*)
+          say "left $(basename "$entry") alone as a way back"
+          continue ;;
+      esac
+      grep -q '^options' "$entry" || continue
+      cp -a "$entry" "$bk/"
+      local missing=""
+      for p in $params; do
+        grep -q -- "$p" "$entry" || missing="${missing:+$missing }$p"
+      done
+      if [ -n "$missing" ]; then
+        # Append to the existing options line rather than adding a second one:
+        # systemd-boot reads only the first, so a second is a silent no-op.
+        sed -i "0,/^options/{s|^options\(.*\)$|options\1 $missing|}" "$entry"
+        touched=1
+        say "added '$missing' to $(basename "$entry")"
+      else
+        say "$(basename "$entry") already has the parameters"
+      fi
+    done
+    shopt -u nullglob
+    say "backup in $bk"
+    [ "$touched" = "1" ] && say "REBOOT REQUIRED" || true
+    return
+  fi
+
+  if [ -f /etc/default/grub ]; then
+    cp -a /etc/default/grub "$bk/"
+    local missing=""
+    for p in $params; do
+      grep -q -- "$p" /etc/default/grub || missing="${missing:+$missing }$p"
+    done
+    if [ -z "$missing" ]; then
+      say "/etc/default/grub already has the parameters"
+      return
+    fi
+    if grep -q '^GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub; then
+      sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=\"\(.*\)\"|GRUB_CMDLINE_LINUX_DEFAULT=\"\1 $missing\"|" /etc/default/grub
+    else
+      echo "GRUB_CMDLINE_LINUX_DEFAULT=\"$missing\"" >> /etc/default/grub
+    fi
+    local cfg=/boot/grub/grub.cfg
+    [ -d /boot/grub2 ] && cfg=/boot/grub2/grub.cfg
+    if command -v grub-mkconfig >/dev/null 2>&1; then grub-mkconfig -o "$cfg"
+    elif command -v grub2-mkconfig >/dev/null 2>&1; then grub2-mkconfig -o "$cfg"
+    else die "grub config edited but no grub-mkconfig to apply it — regenerate by hand"; fi
+    say "backup in $bk"
+    say "REBOOT REQUIRED"
+    return
+  fi
+
+  die "no systemd-boot entries and no /etc/default/grub — add '$params' however this box sets its kernel command line"
+}
+
+# ── VFIO binding ──────────────────────────────────────────────────────────────
+#
+# The only verb taking an argument. `vendor:device`, four hex digits each, and
+# nothing else gets past the pattern — the value is written into a modprobe
+# config that root reads back as instructions.
+valid_ids() {
+  [[ "$1" =~ ^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}(,[0-9a-fA-F]{4}:[0-9a-fA-F]{4})*$ ]]
+}
+
+v_bind_vfio() {
+  local new="${1:-}"
+  [ -n "$new" ] || die "bind-vfio needs a vendor:device pair, e.g. 10de:24b0"
+  valid_ids "$new" || die "not a vendor:device pair: $new"
+
+  # Accumulate rather than replace: a second card must not silently unbind the
+  # first, which is what a plain overwrite would do on the next reboot.
+  local existing=""
+  if [ -f "$MODPROBE_CONF" ]; then
+    existing=$(sed -n 's/^options vfio-pci ids=\([^ ]*\).*/\1/p' "$MODPROBE_CONF" | head -1)
+  fi
+  local all="$new"
+  if [ -n "$existing" ]; then
+    all="$existing"
+    local one
+    for one in ${new//,/ }; do
+      case ",$all," in
+        *",$one,"*) ;;
+        *) all="$all,$one" ;;
+      esac
+    done
+  fi
+  valid_ids "$all" || die "refusing to write a malformed id list: $all"
+
+  cat > "$MODPROBE_CONF" <<EOF
+# Written by leo-spaces-admin. Devices listed here are claimed by vfio-pci at
+# boot instead of their normal driver, so a guest can own them outright.
+options vfio-pci ids=$all
+EOF
+  say "vfio-pci will claim: $all"
+
+  # The modules have to be in the initramfs, or the real driver binds first
+  # and vfio-pci finds the device already taken.
+  if [ -f /etc/mkinitcpio.conf ]; then
+    cp -a /etc/mkinitcpio.conf "$(backup_dir)/"
+    local mods="vfio_pci vfio vfio_iommu_type1"
+    local need=""
+    for m in $mods; do
+      grep -qE "^MODULES=.*\b$m\b" /etc/mkinitcpio.conf || need="${need:+$need }$m"
+    done
+    if [ -n "$need" ]; then
+      # Insert into the MODULES=() array, preserving whatever is already there.
+      sed -i "s|^MODULES=(\(.*\))|MODULES=(\1 $need)|" /etc/mkinitcpio.conf
+      sed -i 's|^MODULES=( |MODULES=(|' /etc/mkinitcpio.conf
+    fi
+    command -v mkinitcpio >/dev/null 2>&1 && mkinitcpio -P || die "mkinitcpio not found"
+  elif [ -d /etc/initramfs-tools ]; then
+    for m in vfio_pci vfio vfio_iommu_type1; do
+      grep -qx "$m" /etc/initramfs-tools/modules 2>/dev/null \
+        || echo "$m" >> /etc/initramfs-tools/modules
+    done
+    command -v update-initramfs >/dev/null 2>&1 && update-initramfs -u \
+      || die "update-initramfs not found"
+  elif command -v dracut >/dev/null 2>&1; then
+    echo 'add_drivers+=" vfio_pci vfio vfio_iommu_type1 "' \
+      > /etc/dracut.conf.d/leo-spaces-vfio.conf
+    dracut --force
+  else
+    die "modprobe config written, but no initramfs generator found — rebuild it by hand"
+  fi
+  say "REBOOT REQUIRED"
+}
+
+v_unbind_vfio() {
+  rm -f "$MODPROBE_CONF" /etc/dracut.conf.d/leo-spaces-vfio.conf
+  if [ -f /etc/mkinitcpio.conf ] && command -v mkinitcpio >/dev/null 2>&1; then
+    mkinitcpio -P
+  elif [ -d /etc/initramfs-tools ] && command -v update-initramfs >/dev/null 2>&1; then
+    update-initramfs -u
+  elif command -v dracut >/dev/null 2>&1; then
+    dracut --force
+  fi
+  say "vfio-pci binding removed — REBOOT REQUIRED"
+}
+
+# ── Dispatch ──────────────────────────────────────────────────────────────────
+#
+# The closed set. Anything not named here exits non-zero without running
+# anything, which is what makes one sudoers rule naming this file a narrow
+# grant rather than a root shell.
+case "${1:-}" in
+  version)          say "leo-spaces-admin $VERSION" ;;
+  install-packages) v_install_packages ;;
+  enable-daemon)    v_enable_daemon ;;
+  setup-network)    v_setup_network ;;
+  setup-storage)    v_setup_storage ;;
+  add-group)        v_add_group ;;
+  fetch-virtio)     v_fetch_virtio ;;
+  enable-iommu)     v_enable_iommu ;;
+  bind-vfio)        v_bind_vfio "${2:-}" ;;
+  unbind-vfio)      v_unbind_vfio ;;
+  *)
+    die "unknown verb '${1:-}'. Known: version install-packages enable-daemon setup-network setup-storage add-group fetch-virtio enable-iommu bind-vfio unbind-vfio"
+    ;;
+esac

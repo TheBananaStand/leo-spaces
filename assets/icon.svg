@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Spaces">
+  <!-- Spaces: whole machines, one card each, running on metal.
+
+       The idea is a *stack of machines*, not a generic cloud or a server
+       rack. Three cards receding into depth say "several of these at once" —
+       which is the package's actual claim, several guests on one host — and
+       the front card is a real window with a title bar, because what you get
+       is a machine you look at and drive, not a container you deploy to.
+
+       The band across the bottom is the host: the metal the cards sit on,
+       with a lit element for the device that has been handed to one guest.
+       Drawn deliberately narrower than the cards so the hierarchy reads the
+       right way round — the machines are the subject, the host is the floor. -->
+  <defs>
+    <linearGradient id="front" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5ac8fa"/>
+      <stop offset="1" stop-color="#0a84ff"/>
+    </linearGradient>
+    <linearGradient id="metal" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#3a3a3c"/>
+      <stop offset="1" stop-color="#58585a"/>
+    </linearGradient>
+  </defs>
+
+  <!-- The two cards behind, each smaller and dimmer: depth without perspective
+       tricks that fall apart at 16px. -->
+  <rect x="150" y="60"  width="212" height="128" rx="18" fill="#0a84ff" opacity="0.22"/>
+  <rect x="126" y="92"  width="260" height="150" rx="20" fill="#0a84ff" opacity="0.42"/>
+
+  <!-- The front machine, with a real title bar. -->
+  <rect x="96" y="128" width="320" height="208" rx="24" fill="url(#front)"/>
+  <!-- Title bar, and the three dots that make it read as a window rather than
+       a tile. Kept to the left so it still reads at small sizes. -->
+  <path d="M96 152a24 24 0 0 1 24-24h272a24 24 0 0 1 24 24v26H96z" fill="#ffffff" opacity="0.26"/>
+  <circle cx="126" cy="153" r="7" fill="#ffffff" opacity="0.9"/>
+  <circle cx="150" cy="153" r="7" fill="#ffffff" opacity="0.62"/>
+  <circle cx="174" cy="153" r="7" fill="#ffffff" opacity="0.62"/>
+
+  <!-- Content lines: a machine with something on it. Varied lengths so it
+       reads as a running screen rather than a placeholder. -->
+  <rect x="128" y="212" width="152" height="14" rx="7" fill="#ffffff" opacity="0.92"/>
+  <rect x="128" y="246" width="214" height="12" rx="6" fill="#ffffff" opacity="0.58"/>
+  <rect x="128" y="278" width="118" height="12" rx="6" fill="#ffffff" opacity="0.42"/>
+
+  <!-- The host: the metal underneath, narrower than the cards. -->
+  <rect x="128" y="372" width="256" height="72" rx="16" fill="url(#metal)"/>
+  <!-- Its lit element — the GPU given to one guest, which is the one piece of
+       the host a person here has to think about. -->
+  <rect x="152" y="396" width="60" height="24" rx="8" fill="#30d158"/>
+  <rect x="226" y="396" width="38" height="24" rx="8" fill="#ffffff" opacity="0.18"/>
+  <rect x="278" y="396" width="38" height="24" rx="8" fill="#ffffff" opacity="0.18"/>
+  <rect x="330" y="396" width="30" height="24" rx="8" fill="#ffffff" opacity="0.18"/>
+</svg>

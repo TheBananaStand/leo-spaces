@@ -1,0 +1,42 @@
+{
+  "name": "spaces",
+  "label": "Spaces",
+  "description": "Run whole machines on a Leo hub — install the hypervisor, create Windows and Linux guests, and hand one a GPU.",
+  "icon": "macwindow.on.rectangle",
+  "version": "0.1.0",
+  "author": "TheBananaStand",
+  "homepage": "https://github.com/TheBananaStand/leo-spaces",
+  "category": "package",
+  "mcp": {
+    "transport": "stdio",
+    "command": "/var/lib/leo/apps/spaces/src/target/release/leo-spaces",
+    "args": ["mcp"]
+  },
+  "descriptor": {
+    "kind": "app",
+    "host_api": 1,
+    "app": {
+      "repo": "https://github.com/TheBananaStand/leo-spaces",
+      "rev": "REPLACE_WITH_COMMIT_SHA",
+      "branch": "main",
+      "build": "cargo build --release",
+      "bin": "target/release/leo-spaces",
+      "port": 0,
+      "webapp": false,
+      "base_path": true
+    },
+    "mcp_server": "spaces",
+    "entitlements": {
+      "settings_read": [
+        "spaces_host",
+        "spaces_ssh_user",
+        "spaces_ssh_port",
+        "spaces_ssh_key"
+      ],
+      "network": ["fedorapeople.org"],
+      "sends": [],
+      "storage_mb": 10
+    },
+    "access": { "mode": "admin_only" }
+  }
+}
