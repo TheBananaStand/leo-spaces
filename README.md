@@ -221,6 +221,33 @@ is not that.
 subprocess, and it does get entitled settings in its environment, so `spaces`
 and `spaces_host` work whatever the HTTP half is doing.
 
+## Publishing it to the store
+
+The store's catalog is `registry.leoconnect.io/registry.json`, and that file is
+the active rows of the D1 behind `admin.leoconnect.io` served directly — there
+is no repo in the loop and no PR to open. A package that is not a row there is
+not in anybody's store, however well it installs from this checkout.
+
+`store/registry-entry.json` is the row. Regenerate it after any descriptor
+change and paste it into the console:
+
+```bash
+bash scripts/sync-registry-entry.sh
+```
+
+It carries the **whole** descriptor, including the embedded `ui` tree, because
+`install_from_registry` hands `entry.descriptor` to the installer verbatim: the
+hub clones this repo for its code and never reads this `descriptor.json`.
+Whatever the row omits, a store-installed copy does not have — no `ui` is a nav
+page with no tree, no `fields` is no Host setting, no `entitlements` is a
+package that may not read its own settings. `cargo test` fails when the row and
+the descriptor disagree.
+
+One thing to check on the target hub first: the install creates the `spaces`
+MCP server from the row's `mcp` block, and refuses if a server of that name
+already exists. A hub that was driven by hand earlier may have a stale one —
+`leo mcp list`, then `leo mcp remove spaces`.
+
 ## The page tree lives in two places
 
 The hub draws a native page from the `ui` field of the descriptor it has
