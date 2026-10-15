@@ -16,24 +16,28 @@
 //! (`crates/leo-package/src/ui/validate.rs`). An unknown kind renders as
 //! nothing at all, silently, so nothing is invented.
 //!
-//! ## This does not render as a dynamic app package, and cannot
+//! ## Two copies of this tree, and which one the clients draw
 //!
-//! The hub jails an app package's HTTP process with bubblewrap: `/usr`, a few
+//! The hub renders a native page from the `ui` field of the descriptor it has
+//! **stored** — `ui_descriptor()` reads that and nothing else. It never asks
+//! an app package for its tree; only `GET /leo/ui/data` is proxied to this
+//! process. So `descriptor.json` carries a copy of [`pages`], written by
+//! `scripts/sync-ui-descriptor.sh`, and `the_embedded_descriptor_matches_this_code`
+//! fails when the two drift.
+//!
+//! ## It renders because the port is fixed
+//!
+//! The hub jails a *dynamic*-port app package with bubblewrap: `/usr`, a few
 //! `/etc` files, `/proc`, `/dev`, a tmpfs `/tmp`, the install dir and the data
-//! dir — and a private network namespace. There is no `/run` and no `/var`, so
+//! dir — and a private network namespace. There is no `/run`, so
 //! `/run/libvirt/libvirt-sock` does not exist inside it and `virsh` can never
 //! reach libvirtd, however many times it is on `$PATH`. `data()` below would
 //! answer every request with an unreachable host.
 //!
-//! The jail is correct. A package that manages the machine it runs on is not
-//! what it is built to contain, and widening it for this one package would
-//! widen it for every package.
-//!
-//! So the live surface is `mcp.rs`, which the hub launches **unjailed**. This
-//! module is kept whole and under test because the descriptor is right and the
-//! grammar check is worth keeping green — it becomes renderable the day this
-//! ships as a compiled in-tree package, or the day the hub distinguishes an
-//! app that manages its host from one that merely runs on it.
+//! `descriptor.json` declares port 8530, which takes the hub's other branch:
+//! spawned bare, with the filesystem the host actually has. The jail is not
+//! widened and nothing is exempted — see the README for what the fixed port
+//! costs in exchange.
 
 use axum::extract::{Query, State};
 use axum::Json;
@@ -60,12 +64,25 @@ pub struct DataQuery {
     page: Option<String>,
 }
 
+/// The page tree, keyed by page path — the shape the hub stores as a
+/// descriptor's `ui` field and the shape this package serves.
+///
+/// One function because there are two consumers that must not disagree: the
+/// hub renders the **embedded** copy in `descriptor.json` (it never asks an
+/// app package for its tree, only for its *data*), and `GET
+/// /leo/ui/descriptor` serves this one for anything driving the app directly.
+/// `scripts/sync-ui-descriptor.sh` writes the first from the second, and
+/// `the_embedded_descriptor_matches_this_code` fails when they drift.
+pub fn pages() -> Value {
+    json!({ DEFAULT_PAGE: screen() })
+}
+
 /// `GET /leo/ui/descriptor` — the static tree.
 pub async fn descriptor_handler(
     _c: crate::auth::Caller,
     _s: State<AppState>,
 ) -> Json<Value> {
-    Json(json!({ "spaces": screen() }))
+    Json(pages())
 }
 
 /// `GET /leo/ui/data?page=spaces` — everything live.
@@ -109,7 +126,12 @@ fn screen() -> Value {
                 "Can the GPU be passed through?"
             ]
         },
-        "children": [{
+        // `body`, not `children`: the renderers read a screen's one child from
+        // `body` (`ScreenView` → `node.node("body")`), and a screen carrying
+        // `children` instead draws the placeholder "This screen has no 'body'
+        // to draw" with nothing under it. The kind is spelled right, every node
+        // below is valid, and nothing logs — see `a_screen_draws_from_body`.
+        "body": {
             "kind": "masterDetail",
             "selectionKey": "selectedId",
             "dividers": true,
@@ -127,10 +149,14 @@ fn screen() -> Value {
                     "searchFields": ["title", "subtitle", "trailing"]
                 },
                 "empty": empty_states(),
-                "children": [row()]
+                // `item`, not `children`: a list's row template is read from
+                // `item` by both the master-detail list and the standalone
+                // `list` kind. With `children` the pane draws "This
+                // masterDetail has no 'list.item' to draw" and no rows.
+                "item": row()
             },
             "detail": detail()
-        }]
+        }
     })
 }
 
@@ -338,7 +364,7 @@ fn fields_list() -> Value {
         "kind": "list",
         "bind": "sections",
         "spacing": 14,
-        "children": [{
+        "item": {
             "kind": "vstack",
             "spacing": 8,
             "align": "leading",
@@ -348,7 +374,7 @@ fn fields_list() -> Value {
                     "kind": "list",
                     "bind": "fields",
                     "spacing": 8,
-                    "children": [{
+                    "item": {
                         "kind": "hstack",
                         "spacing": 8,
                         "align": "center",
@@ -357,10 +383,10 @@ fn fields_list() -> Value {
                             { "kind": "spacer" },
                             { "kind": "text", "bind": "value", "style": "mono", "lines": 1 }
                         ]
-                    }]
+                    }
                 }
             ]
-        }]
+        }
     })
 }
 
@@ -1351,6 +1377,91 @@ mod grammar_tests {
     use super::grammar::*;
     use super::*;
 
+    /// The tree embedded in `descriptor.json` is the tree this code builds.
+    ///
+    /// The hub renders a native page from the **stored descriptor's** `ui`
+    /// field; `ui_descriptor()` reads that and nothing else, and only
+    /// `/leo/ui/data` is proxied to this process. So an embedded copy that has
+    /// drifted is not a stale-looking page, it is a page drawn from old code
+    /// with today's data bound into it — missing rows, dead buttons, binds that
+    /// resolve to nothing, and no error anywhere. Regenerate with
+    /// `scripts/sync-ui-descriptor.sh`.
+    #[test]
+    fn the_embedded_descriptor_matches_this_code() {
+        let descriptor: Value = serde_json::from_str(include_str!("../descriptor.json")).unwrap();
+        let embedded = descriptor.get("ui").unwrap_or_else(|| {
+            panic!("descriptor.json has no `ui` — the page would have no tree to render")
+        });
+        assert_eq!(
+            embedded,
+            &pages(),
+            "descriptor.json's ui has drifted from ui.rs — run scripts/sync-ui-descriptor.sh"
+        );
+    }
+
+    /// Some kinds are *made of* one named child, and reading it from the wrong
+    /// key draws a placeholder instead of the content.
+    ///
+    /// The renderers say this out loud — `missingChildNotice(kind:key:)` is
+    /// "This screen has no 'body' to draw", "This masterDetail has no
+    /// 'list.item' to draw" — but only on screen, to whoever is looking. Every
+    /// kind is spelled correctly in that state and every prop is a real prop,
+    /// so the grammar walk passes a tree that renders as an empty pane. Both
+    /// mistakes were made here and both cost a round of "the package installs,
+    /// the app serves, the page is blank" to find.
+    ///
+    /// `children` is the trap: it is a real prop on the stacks, so it looks
+    /// right everywhere. For these three kinds it is simply not read.
+    #[test]
+    fn the_kinds_made_of_one_named_child_have_it() {
+        /// kind → the key its content must be under, and whether `children`
+        /// there is a mistake rather than merely unused.
+        const REQUIRED: &[(&str, &str)] = &[
+            ("screen", "body"),
+            ("list", "item"),
+            ("masterDetail", "list"),
+        ];
+
+        let tree = pages();
+        let mut problems = Vec::new();
+        check(&tree, "spaces", &mut problems, REQUIRED);
+        assert!(
+            problems.is_empty(),
+            "nodes whose content is under a key no renderer reads:\n  {}",
+            problems.join("\n  ")
+        );
+
+        fn check(v: &Value, path: &str, out: &mut Vec<String>, rules: &[(&str, &str)]) {
+            match v {
+                Value::Object(map) => {
+                    let required = map
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .and_then(|kind| rules.iter().find(|(k, _)| *k == kind));
+                    if let Some((kind, key)) = required {
+                        if !map.contains_key(*key) {
+                            out.push(format!("{path}: {kind} has no `{key}`"));
+                        } else if map.contains_key("children") {
+                            out.push(format!(
+                                "{path}: {kind} carries `children`, which it does not read — \
+                                 its content belongs under `{key}`"
+                            ));
+                        }
+                    }
+                    for (k, child) in map {
+                        check(child, &format!("{path}.{k}"), out, rules);
+                    }
+                }
+                Value::Array(items) => {
+                    for (i, item) in items.iter().enumerate() {
+                        check(item, &format!("{path}[{i}]"), out, rules);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Walk the descriptor and check every `kind`, `style`, colour, prop name
     /// and action against the grammar the renderers implement.
     ///
@@ -1361,7 +1472,7 @@ mod grammar_tests {
     /// does nothing.
     #[test]
     fn the_descriptor_uses_only_real_grammar() {
-        let tree = json!({ "spaces": screen() });
+        let tree = pages();
         let mut problems = Vec::new();
         walk(&tree, "spaces", &mut problems);
         assert!(

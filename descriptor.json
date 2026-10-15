@@ -86,5 +86,611 @@
   "access": {
     "mode": "admin_only"
   },
-  "default_enabled": false
+  "default_enabled": false,
+  "ui": {
+    "spaces": {
+      "addressableState": [
+        "tab",
+        "selectedId"
+      ],
+      "assistant": {
+        "app": "Spaces",
+        "placeholder": "Ask about your machines…",
+        "suggestions": [
+          "Is the hypervisor set up on this host?",
+          "What's running right now?",
+          "Start the Windows CAD machine",
+          "Can the GPU be passed through?"
+        ]
+      },
+      "body": {
+        "detail": {
+          "align": "leading",
+          "children": [
+            {
+              "bind": "kind_label",
+              "kind": "badge",
+              "tintFrom": "badge_color"
+            },
+            {
+              "bind": "title",
+              "kind": "text",
+              "style": "title",
+              "wrap": true
+            },
+            {
+              "bind": "detail_text",
+              "hideWhenEmpty": true,
+              "kind": "text",
+              "style": "subtle",
+              "wrap": true
+            },
+            {
+              "kind": "divider"
+            },
+            {
+              "bind": "sections",
+              "item": {
+                "align": "leading",
+                "children": [
+                  {
+                    "bind": "title",
+                    "kind": "text",
+                    "style": "section-label"
+                  },
+                  {
+                    "bind": "fields",
+                    "item": {
+                      "align": "center",
+                      "children": [
+                        {
+                          "bind": "label",
+                          "kind": "text",
+                          "style": "caption"
+                        },
+                        {
+                          "kind": "spacer"
+                        },
+                        {
+                          "bind": "value",
+                          "kind": "text",
+                          "lines": 1,
+                          "style": "mono"
+                        }
+                      ],
+                      "kind": "hstack",
+                      "spacing": 8
+                    },
+                    "kind": "list",
+                    "spacing": 8
+                  }
+                ],
+                "kind": "vstack",
+                "spacing": 8
+              },
+              "kind": "list",
+              "spacing": 14
+            },
+            {
+              "align": "leading",
+              "children": [
+                {
+                  "kind": "text",
+                  "style": "section-label",
+                  "value": "IN THE WAY"
+                },
+                {
+                  "bind": "blocked",
+                  "color": "muted",
+                  "kind": "text",
+                  "style": "caption",
+                  "wrap": true
+                }
+              ],
+              "hideWhenEmpty": true,
+              "kind": "vstack",
+              "paddingTop": 4,
+              "spacing": 6,
+              "visibleWhen": {
+                "equals": "1",
+                "field": "has_blocker"
+              }
+            },
+            {
+              "align": "leading",
+              "children": [
+                {
+                  "kind": "text",
+                  "style": "section-label",
+                  "value": "COMMAND"
+                },
+                {
+                  "bind": "command",
+                  "color": "secondary",
+                  "kind": "text",
+                  "style": "mono",
+                  "wrap": true
+                },
+                {
+                  "children": [
+                    {
+                      "action": {
+                        "kind": "copyText",
+                        "text": "{command}"
+                      },
+                      "kind": "button",
+                      "label": "Copy",
+                      "variant": "pill"
+                    }
+                  ],
+                  "kind": "hstack"
+                }
+              ],
+              "kind": "vstack",
+              "paddingTop": 4,
+              "spacing": 6,
+              "visibleWhen": {
+                "equals": "1",
+                "field": "has_command"
+              }
+            },
+            {
+              "align": "leading",
+              "children": [
+                {
+                  "kind": "text",
+                  "style": "section-label",
+                  "value": "CONTROLS"
+                },
+                {
+                  "children": [
+                    {
+                      "action": {
+                        "body": {
+                          "action": "start"
+                        },
+                        "method": "POST",
+                        "path": "/p/spaces/api/spaces/{title}/control",
+                        "refresh": "reload"
+                      },
+                      "kind": "button",
+                      "label": "Start",
+                      "variant": "pill",
+                      "visibleWhen": {
+                        "equals": "off",
+                        "field": "running"
+                      }
+                    },
+                    {
+                      "action": {
+                        "body": {
+                          "action": "shutdown"
+                        },
+                        "method": "POST",
+                        "path": "/p/spaces/api/spaces/{title}/control",
+                        "refresh": "reload"
+                      },
+                      "kind": "button",
+                      "label": "Shut down",
+                      "variant": "pill",
+                      "visibleWhen": {
+                        "equals": "on",
+                        "field": "running"
+                      }
+                    },
+                    {
+                      "action": {
+                        "body": {
+                          "action": "reboot"
+                        },
+                        "method": "POST",
+                        "path": "/p/spaces/api/spaces/{title}/control",
+                        "refresh": "reload"
+                      },
+                      "kind": "button",
+                      "label": "Restart",
+                      "variant": "pill",
+                      "visibleWhen": {
+                        "equals": "on",
+                        "field": "running"
+                      }
+                    }
+                  ],
+                  "kind": "hstack",
+                  "spacing": 8
+                },
+                {
+                  "children": [
+                    {
+                      "action": {
+                        "confirm": {
+                          "body": {
+                            "action": "force_off"
+                          },
+                          "method": "POST",
+                          "path": "/p/spaces/api/spaces/{title}/control",
+                          "refresh": "reload"
+                        },
+                        "confirmLabel": "Force off",
+                        "destructive": true,
+                        "kind": "confirm",
+                        "message": "Cuts the power without telling the guest. Unsaved work is lost, and a guest writing to disk can be left with a damaged filesystem. Use Shut down unless it has stopped responding.",
+                        "title": "Force “{title}” off?"
+                      },
+                      "kind": "button",
+                      "label": "Force off",
+                      "variant": "destructive",
+                      "visibleWhen": {
+                        "equals": "on",
+                        "field": "running"
+                      }
+                    }
+                  ],
+                  "kind": "hstack",
+                  "paddingTop": 2,
+                  "spacing": 8
+                }
+              ],
+              "kind": "vstack",
+              "paddingTop": 8,
+              "spacing": 8,
+              "visibleWhen": {
+                "equals": "space",
+                "field": "kind"
+              }
+            },
+            {
+              "align": "leading",
+              "children": [
+                {
+                  "children": [
+                    {
+                      "action": {
+                        "body": {
+                          "step": "{id}"
+                        },
+                        "method": "POST",
+                        "path": "/p/spaces/api/host/apply",
+                        "refresh": "reload"
+                      },
+                      "kind": "button",
+                      "label": "Apply",
+                      "variant": "pill",
+                      "visibleWhen": {
+                        "equals": "direct",
+                        "field": "apply_mode"
+                      }
+                    }
+                  ],
+                  "kind": "hstack",
+                  "spacing": 8
+                },
+                {
+                  "children": [
+                    {
+                      "action": {
+                        "confirm": {
+                          "body": {
+                            "step": "{id}"
+                          },
+                          "method": "POST",
+                          "path": "/p/spaces/api/host/apply",
+                          "refresh": "reload"
+                        },
+                        "confirmLabel": "Write it",
+                        "destructive": true,
+                        "kind": "confirm",
+                        "message": "This edits the kernel command line. A backup of the boot configuration is written first, and any fallback entry is left untouched so there is a way back. The change takes effect on the next reboot — nothing restarts now.",
+                        "title": "Change how this host boots?"
+                      },
+                      "kind": "button",
+                      "label": "Apply and reboot later",
+                      "variant": "destructive",
+                      "visibleWhen": {
+                        "equals": "boot",
+                        "field": "apply_mode"
+                      }
+                    }
+                  ],
+                  "kind": "hstack",
+                  "spacing": 8
+                }
+              ],
+              "kind": "vstack",
+              "paddingTop": 8,
+              "spacing": 8,
+              "visibleWhen": {
+                "equals": "step",
+                "field": "kind"
+              }
+            }
+          ],
+          "kind": "vstack",
+          "spacing": 12
+        },
+        "detailWidth": 360,
+        "dividerInset": 22,
+        "dividers": true,
+        "kind": "masterDetail",
+        "list": {
+          "bind": "rows",
+          "empty": {
+            "children": [
+              {
+                "icon": "macwindow",
+                "kind": "emptyState",
+                "message": "Once the host is set up, ask Leo to create one — “make a Windows Server space with 8 cores and 16 GB”.",
+                "title": "No spaces yet",
+                "visibleWhen": {
+                  "equals": "spaces",
+                  "state": "tab"
+                }
+              },
+              {
+                "icon": "checkmark.seal",
+                "kind": "emptyState",
+                "message": "Everything a guest needs is installed and running.",
+                "title": "Host is ready",
+                "visibleWhen": {
+                  "equals": "setup",
+                  "state": "tab"
+                }
+              },
+              {
+                "icon": "cpu",
+                "kind": "emptyState",
+                "message": "Nothing on the PCI bus reports itself as a display adapter.",
+                "title": "No graphics devices found",
+                "visibleWhen": {
+                  "equals": "hardware",
+                  "state": "tab"
+                }
+              }
+            ],
+            "kind": "vstack"
+          },
+          "filter": {
+            "equalsState": "tab",
+            "field": "tab",
+            "search": "query",
+            "searchFields": [
+              "title",
+              "subtitle",
+              "trailing"
+            ]
+          },
+          "item": {
+            "align": "center",
+            "children": [
+              {
+                "colorFrom": "state_color",
+                "kind": "dot",
+                "size": 7
+              },
+              {
+                "align": "leading",
+                "children": [
+                  {
+                    "align": "center",
+                    "children": [
+                      {
+                        "bind": "title",
+                        "kind": "text",
+                        "lines": 1,
+                        "style": "headline"
+                      },
+                      {
+                        "bind": "badge",
+                        "hideWhenEmpty": true,
+                        "kind": "badge",
+                        "tintFrom": "badge_color"
+                      }
+                    ],
+                    "kind": "hstack",
+                    "spacing": 7
+                  },
+                  {
+                    "bind": "subtitle",
+                    "hideWhenEmpty": true,
+                    "kind": "text",
+                    "lines": 1,
+                    "style": "caption"
+                  }
+                ],
+                "kind": "vstack",
+                "spacing": 3
+              },
+              {
+                "kind": "spacer"
+              },
+              {
+                "bind": "trailing",
+                "color": "secondary",
+                "hideWhenEmpty": true,
+                "kind": "text",
+                "style": "mono"
+              }
+            ],
+            "kind": "hstack",
+            "paddingH": 22,
+            "paddingV": 12,
+            "spacing": 11
+          },
+          "kind": "list"
+        },
+        "selectionKey": "selectedId",
+        "sidebar": {
+          "children": [
+            {
+              "align": "leading",
+              "children": [
+                {
+                  "kind": "text",
+                  "style": "section-label",
+                  "value": "HYPERVISOR"
+                },
+                {
+                  "align": "center",
+                  "children": [
+                    {
+                      "colorFrom": "host_status_color",
+                      "kind": "dot",
+                      "size": 8
+                    },
+                    {
+                      "bind": "host_status_label",
+                      "kind": "text",
+                      "style": "headline"
+                    }
+                  ],
+                  "kind": "hstack",
+                  "spacing": 8
+                },
+                {
+                  "bind": "host_label",
+                  "color": "secondary",
+                  "hideWhenEmpty": true,
+                  "kind": "text",
+                  "lines": 1,
+                  "style": "mono"
+                }
+              ],
+              "kind": "vstack",
+              "paddingH": 10,
+              "paddingV": 6,
+              "spacing": 5
+            },
+            {
+              "align": "center",
+              "children": [
+                {
+                  "kind": "text",
+                  "style": "caption",
+                  "value": "CPU"
+                },
+                {
+                  "kind": "spacer"
+                },
+                {
+                  "bind": "cpu_label",
+                  "color": "secondary",
+                  "hideWhenEmpty": true,
+                  "kind": "text",
+                  "lines": 1,
+                  "style": "mono"
+                }
+              ],
+              "kind": "hstack",
+              "paddingH": 10,
+              "paddingV": 2,
+              "spacing": 6
+            },
+            {
+              "align": "center",
+              "children": [
+                {
+                  "kind": "text",
+                  "style": "caption",
+                  "value": "Memory"
+                },
+                {
+                  "kind": "spacer"
+                },
+                {
+                  "bind": "memory_label",
+                  "color": "secondary",
+                  "hideWhenEmpty": true,
+                  "kind": "text",
+                  "lines": 1,
+                  "style": "mono"
+                }
+              ],
+              "kind": "hstack",
+              "paddingH": 10,
+              "paddingV": 2,
+              "spacing": 6
+            },
+            {
+              "align": "center",
+              "children": [
+                {
+                  "kind": "text",
+                  "style": "caption",
+                  "value": "IOMMU"
+                },
+                {
+                  "kind": "spacer"
+                },
+                {
+                  "bind": "iommu_label",
+                  "color": "secondary",
+                  "hideWhenEmpty": true,
+                  "kind": "text",
+                  "lines": 1,
+                  "style": "mono"
+                }
+              ],
+              "kind": "hstack",
+              "paddingH": 10,
+              "paddingV": 2,
+              "spacing": 6
+            },
+            {
+              "children": [
+                {
+                  "kind": "text",
+                  "style": "section-label",
+                  "value": "Machines"
+                }
+              ],
+              "kind": "hstack",
+              "paddingH": 10,
+              "paddingTop": 16
+            },
+            {
+              "kind": "searchField",
+              "placeholder": "Search",
+              "stateKey": "query",
+              "width": 208
+            },
+            {
+              "countBind": "space_count",
+              "icon": "macwindow",
+              "kind": "selectRow",
+              "label": "Spaces",
+              "stateKey": "tab",
+              "value": "spaces"
+            },
+            {
+              "countBind": "setup_count",
+              "icon": "wrench.and.screwdriver",
+              "kind": "selectRow",
+              "label": "Host setup",
+              "stateKey": "tab",
+              "value": "setup"
+            },
+            {
+              "countBind": "gpu_count",
+              "icon": "cpu",
+              "kind": "selectRow",
+              "label": "Hardware",
+              "stateKey": "tab",
+              "value": "hardware"
+            }
+          ],
+          "kind": "vstack",
+          "spacing": 2
+        },
+        "sidebarWidth": 232
+      },
+      "kind": "screen",
+      "route": "/spaces",
+      "state": {
+        "query": "",
+        "selectedId": "",
+        "tab": "spaces"
+      },
+      "title": "Spaces"
+    }
+  }
 }

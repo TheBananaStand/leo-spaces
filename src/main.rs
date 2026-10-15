@@ -31,6 +31,7 @@
 //!
 //! `leo-spaces start` — the HTTP server (the default when no argument is given)
 //! `leo-spaces mcp`   — speak MCP over stdio instead
+//! `leo-spaces ui-descriptor` — print the page tree, for embedding
 //!
 //! They share one binary because the hub launches an MCP subprocess with only
 //! entitled settings in its environment — not the app's port — so a separate
@@ -156,6 +157,14 @@ async fn main() {
     let cfg = Arc::new(config::Config::load().await);
 
     match std::env::args().nth(1).as_deref() {
+        // The tree for `descriptor.json`'s `ui` field, which is the copy the
+        // hub actually renders — see ui::pages and sync-ui-descriptor.sh.
+        Some("ui-descriptor") => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&ui::pages()).expect("the tree serialises")
+            );
+        }
         Some("mcp") => {
             eprintln!("leo-spaces: MCP stdio mode, host {}", cfg.host);
             mcp::run(cfg).await;

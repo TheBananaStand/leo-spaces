@@ -221,19 +221,45 @@ is not that.
 subprocess, and it does get entitled settings in its environment, so `spaces`
 and `spaces_host` work whatever the HTTP half is doing.
 
+## The page tree lives in two places
+
+The hub draws a native page from the `ui` field of the descriptor it has
+**stored**. It never asks an app package for its tree — only `GET
+/leo/ui/data` is proxied to this process — so `descriptor.json` carries a copy
+of what `ui.rs` builds:
+
+```bash
+bash scripts/sync-ui-descriptor.sh    # after any change to ui.rs
+```
+
+`cargo test` fails when the two drift, because a stale embedded tree is not a
+stale-looking page: it is yesterday's rows with today's data bound into them,
+and nothing logs.
+
+Two structural rules cost a round of "it installs, it serves, the pane is
+empty" each, and are now asserted rather than discovered:
+
+- a `screen` draws its content from **`body`**, not `children`
+- a `list` draws its rows from **`item`**, not `children`
+
+Both are real props elsewhere in the grammar, so every kind is spelled right
+and every prop is valid in the broken state. The renderers say it out loud —
+*This screen has no "body" to draw* — but only on screen, to whoever is
+looking.
+
 Every mistake in a descriptor is silent — an unknown `kind` renders nothing, an
 unknown `style` falls back to body text, an unseeded `stateKey` reads as `""`
 and anything gated on it hides forever. Nothing logs. So the grammar is
 checked in `cargo test`: every kind, prop, text style, colour token, action
 shape, state key and REST path in the tree is verified against the vocabulary
-the renderers implement, and against the routes `api::router()` actually
-serves.
+the renderers implement, against the routes `api::router()` actually serves,
+and against the copy embedded in `descriptor.json`.
 
 ## Build and test
 
 ```bash
 cargo build --release     # → target/release/leo-spaces
-cargo test                # 84 tests, no hypervisor needed
+cargo test                # 86 tests, no hypervisor needed
 ```
 
 The tests run without libvirt, without root and without a guest. They cover the
