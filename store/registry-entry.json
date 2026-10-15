@@ -1,7 +1,7 @@
 {
   "name": "spaces",
   "label": "Spaces",
-  "description": "Run whole machines on a Leo hub \u2014 install the hypervisor, create Windows and Linux guests, and hand one a GPU.",
+  "description": "Run whole machines on a Leo hub — install the hypervisor, create Windows and Linux guests, and hand one a GPU.",
   "icon": "macwindow.on.rectangle",
   "version": "0.1.0",
   "author": "TheBananaStand",
@@ -19,11 +19,11 @@
     "host_api": 1,
     "app": {
       "repo": "https://github.com/TheBananaStand/leo-spaces",
-      "rev": "00b23245089380dc99046a975a9bd3dfa74d18e0",
+      "rev": "43e415bec6b0b5eeb5600f9c4903d8216a7a8e71",
       "branch": "main",
       "build": "cargo build --release",
       "bin": "target/release/leo-spaces",
-      "port": 0,
+      "port": 8530,
       "webapp": false,
       "base_path": true
     },
