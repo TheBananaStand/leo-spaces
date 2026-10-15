@@ -19,7 +19,7 @@
     "host_api": 1,
     "app": {
       "repo": "https://github.com/TheBananaStand/leo-spaces",
-      "rev": "13988a20c0363248cae41c44f2054008ead4f80d",
+      "rev": "00b23245089380dc99046a975a9bd3dfa74d18e0",
       "branch": "main",
       "build": "cargo build --release",
       "bin": "target/release/leo-spaces",
