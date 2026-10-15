@@ -81,7 +81,7 @@
       "fedorapeople.org"
     ],
     "sends": [],
-    "storage_mb": 10
+    "storage_mb": 4096
   },
   "access": {
     "mode": "admin_only"

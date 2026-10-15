@@ -180,6 +180,20 @@ recorded that as "this CPU cannot virtualise". Every host alive would have been
 reported as unable to run a guest. The string is syntactically fine and a
 mocked shell would have accepted it.
 
+## `storage_mb` is sized for a build tree, not for data
+
+The hub measures `entitlements.storage_mb` against `{data_dir}/apps/<name>`,
+and for an app package that directory is the **whole checkout** — Rust
+`target/` included, which is ~230 MB after a release build. Over 2× budget the
+hub stops the process, so a small figure reads as a runaway and the app never
+starts: no HTTP server, no `/leo/ui/descriptor`, and therefore no page in the
+nav, with the reason only in the hub's journal.
+
+This package keeps no data of its own — there is no database, libvirt holds the
+domains, and guest disks live in `/var/lib/leo-spaces` — so the budget exists
+purely as a ceiling on the build tree. 4096 covers it with headroom and still
+guards against something genuinely running away.
+
 ## Limits worth knowing
 
 - **Licences are the real ceiling.** Every concurrent instance of a
