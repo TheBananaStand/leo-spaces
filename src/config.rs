@@ -269,10 +269,24 @@ async fn fetch_settings(api_url: &str, token: &str) -> anyhow::Result<BTreeMap<S
     /// what a wrong endpoint can make this process allocate.
     const MAX_REPLY: u64 = 64 * 1024;
 
+    // Everything that goes into a request line or a header is checked first.
+    // Both of these arrive from outside this process — `LEO_API_URL` from the
+    // environment, the token from a file — and a `\r\n` in either would end
+    // the line early and let the rest be read as a header of its own. The
+    // values are a loopback authority and an opaque credential; neither has
+    // any business containing a control character, so this costs nothing and
+    // removes the question.
     let authority = api_url
         .trim_end_matches('/')
         .strip_prefix("http://")
-        .with_context(|| format!("LEO_API_URL must be a plain http:// loopback URL, got {api_url}"))?;
+        .with_context(|| format!("LEO_API_URL must be a plain http:// loopback URL, got {api_url}"))?
+        // `http://127.0.0.1:8420/api` is a reasonable thing to be handed, and
+        // `TcpStream::connect` cannot parse a path. Take the authority.
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    header_safe(authority, "LEO_API_URL")?;
+    header_safe(token, "the package token")?;
 
     let mut stream = tokio::net::TcpStream::connect(authority)
         .await
@@ -348,6 +362,24 @@ async fn fetch_settings(api_url: &str, token: &str) -> anyhow::Result<BTreeMap<S
 /// This package's name, as the hub knows it — the `name` in `descriptor.json`,
 /// which is what a package token is bound to.
 const PACKAGE: &str = "spaces";
+
+/// Refuse a value that cannot appear in a header line.
+///
+/// Space is included deliberately: neither an authority nor a bearer token may
+/// contain one, and a token file that picked up a stray word is a
+/// misconfiguration worth refusing by name rather than sending.
+fn header_safe(value: &str, what: &str) -> anyhow::Result<()> {
+    if value.is_empty() {
+        anyhow::bail!("{what} is empty");
+    }
+    if let Some(bad) = value
+        .chars()
+        .find(|c| c.is_control() || c.is_whitespace() || !c.is_ascii())
+    {
+        anyhow::bail!("{what} contains {bad:?}, which cannot go in an HTTP header");
+    }
+    Ok(())
+}
 
 /// Reassemble a `Transfer-Encoding: chunked` body.
 ///
@@ -466,6 +498,32 @@ mod tests {
         assert_eq!(env.ssh_user.as_deref(), Some("leo"));
         assert_eq!(env.ssh_port.as_deref(), Some("2222"));
         assert_eq!(env.ssh_key, None);
+    }
+
+    /// Nothing that cannot sit on a header line is sent on one.
+    ///
+    /// The token is read from a file and the authority from the environment;
+    /// a CRLF in either would end the request line early and have the rest
+    /// read as headers. Checked rather than escaped, because there is no
+    /// legitimate value here that needs escaping.
+    #[test]
+    fn a_value_with_a_newline_in_it_is_refused() {
+        assert!(header_safe("127.0.0.1:8420", "authority").is_ok());
+        assert!(header_safe("leo_pkg_abc123", "token").is_ok());
+
+        for bad in [
+            "leo_pkg_a\r\nX-Injected: 1",
+            "leo_pkg_a\nX-Injected: 1",
+            "127.0.0.1:8420\r\nHost: elsewhere",
+            "leo_pkg a",
+            "leo_pkg_\u{7f}",
+            "",
+        ] {
+            assert!(
+                header_safe(bad, "value").is_err(),
+                "{bad:?} should be refused"
+            );
+        }
     }
 
     /// A blank value from the hub is not a value.

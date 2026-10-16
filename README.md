@@ -221,6 +221,25 @@ is not that.
 subprocess, and it does get entitled settings in its environment, so `spaces`
 and `spaces_host` work whatever the HTTP half is doing.
 
+## The icon
+
+`assets/icon.svg` — 1024 square, full-bleed gradient, white stroke glyph on a
+24-unit grid, which is the house style the in-tree packages use. Two machine
+cards and the host bar under them, with one lit element for the device a guest
+has been given. The design constraint is sixteen pixels: that is what the nav
+renders, and window dots and content lines are mud at that size.
+
+A hub generates the whole rendition ladder (16 → 1024) from one square source,
+and rasterizes an uploaded SVG itself. Put it on a hub in Settings → Packages →
+Spaces → App Icon, with either file; `scripts/render-icon.sh` regenerates the
+PNG for a box with no rasterizer.
+
+It is a manual step, and that is a gap in Leo rather than a choice here: artwork
+delivered *with* a package only reaches the ladder through a store bundle's
+`{data_dir}/plugins/<name>/icon.png`, and an app package that serves a native
+descriptor ships no bundle. The app-install path copies `ui/ui.js` from the repo
+and nothing else.
+
 ## Publishing it to the store
 
 The store's catalog is `registry.leoconnect.io/registry.json`, and that file is
