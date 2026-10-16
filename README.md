@@ -28,10 +28,18 @@ is the graphics devices and whether each can be isolated for a guest.
 From the Leo store, or by hand:
 
 ```bash
-leo packages install descriptor.json \
-  --mcp-command "/var/lib/leo/apps/spaces/src/target/release/leo-spaces mcp" \
-  --enabled
+leo packages install descriptor.json --enabled
+leo mcp add spaces /var/lib/leo/apps/spaces/src/target/release/leo-spaces mcp
 ```
+
+**Two commands, and the second is not optional.** `perform_dynamic_install`
+returns at `descriptor.is_app()` — *before* the block that creates a package's
+MCP server — so an app package never gets one, and `--mcp-command` is accepted
+and ignored with nothing logged. The install then looks complete and has no
+tools. Registering the server separately is what `mcp_server: "spaces"` in the
+descriptor is for: the hub adopts a server of that name and lists it as part of
+this package rather than as a bare one. Order does not matter; the binary has
+to exist, which it does once the install above has built it.
 
 Then, once, as root on that box:
 
@@ -262,10 +270,12 @@ page with no tree, no `fields` is no Host setting, no `entitlements` is a
 package that may not read its own settings. `cargo test` fails when the row and
 the descriptor disagree.
 
-One thing to check on the target hub first: the install creates the `spaces`
-MCP server from the row's `mcp` block, and refuses if a server of that name
-already exists. A hub that was driven by hand earlier may have a stale one —
-`leo mcp list`, then `leo mcp remove spaces`.
+The row's `mcp` block describes the server this package wants, and today the
+hub does not act on it for an app package (see **Install** — the early return
+at `descriptor.is_app()`). It is kept because it is true, because the console
+shows it as an execution surface for consent, and because it starts working the
+day that ordering is fixed. Until then a store install needs the same second
+command as a hand install, which `setup_hint` says on the install screen.
 
 ## The page tree lives in two places
 
