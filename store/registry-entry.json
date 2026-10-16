@@ -32,7 +32,7 @@
     "kind": "app",
     "app": {
       "repo": "https://github.com/TheBananaStand/leo-spaces",
-      "rev": "b04225e5dfbe270fd309841b413d01c3cb9faf8b",
+      "rev": "0a9457a87aedd02914ea3de0a46c1e222ecc0160",
       "branch": "main",
       "build": "cargo build --release",
       "bin": "target/release/leo-spaces",
