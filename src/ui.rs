@@ -110,7 +110,15 @@ fn screen() -> Value {
     json!({
         "kind": "screen",
         "title": "Spaces",
-        "route": "/spaces",
+        // No `route`. The hub derives a package page's native address from the
+        // tree's `route` when it declares one, and from `/p/<pkg>/<path>`
+        // otherwise — and `/p/<pkg>/<path>` is what every nav surface actually
+        // addresses. Declaring "/spaces" published a route nothing navigates
+        // to: the nav click asked for /p/spaces/spaces, found no native surface
+        // for it, fell through to a web view, and got the hub's "Spaces has no
+        // web page" card. Short routes belong to compiled-in packages, which
+        // carry `builtin_route` on the page to match. See
+        // `the_declared_route_is_the_one_the_nav_opens`.
         "state": { "tab": "spaces", "query": "", "selectedId": "" },
         // Both are addressable so a space can be linked to directly — which is
         // what makes "open the CAD machine" a thing the assistant can answer
@@ -1397,6 +1405,32 @@ mod grammar_tests {
             &pages(),
             "descriptor.json's ui has drifted from ui.rs — run scripts/sync-ui-descriptor.sh"
         );
+    }
+
+    /// A screen's address is the one the nav opens, or it has none.
+    ///
+    /// `rebuild_tools` publishes `tree.route` as the page's native route when
+    /// it is declared, falling back to `/p/<pkg>/<path>`. Every nav surface
+    /// addresses a package page at `/p/<pkg>/<path>`, so a tree that declares
+    /// anything else publishes an address nothing navigates to: the click
+    /// resolves no native surface, opens a web view, and lands on the hub's
+    /// "has no web page" card. Nothing is logged, the package is healthy, and
+    /// the page works perfectly if you type the declared route by hand — which
+    /// is how this survived a day of testing.
+    #[test]
+    fn the_declared_route_is_the_one_the_nav_opens() {
+        let descriptor: Value = serde_json::from_str(include_str!("../descriptor.json")).unwrap();
+        let package = descriptor["name"].as_str().unwrap();
+        for (page, tree) in pages().as_object().expect("pages is an object") {
+            let Some(declared) = tree.get("route").and_then(Value::as_str) else {
+                continue; // Undeclared is correct: the hub derives the address.
+            };
+            assert_eq!(
+                declared,
+                format!("/p/{package}/{page}"),
+                "page '{page}' declares a route the nav never opens"
+            );
+        }
     }
 
     /// Some kinds are *made of* one named child, and reading it from the wrong

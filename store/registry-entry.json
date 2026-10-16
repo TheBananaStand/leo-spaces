@@ -700,7 +700,6 @@
           "sidebarWidth": 232
         },
         "kind": "screen",
-        "route": "/spaces",
         "state": {
           "query": "",
           "selectedId": "",
