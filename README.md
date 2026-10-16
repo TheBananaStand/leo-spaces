@@ -231,11 +231,16 @@ and `spaces_host` work whatever the HTTP half is doing.
 
 ## The icon
 
-`assets/icon.svg` — 1024 square, full-bleed gradient, white stroke glyph on a
-24-unit grid, which is the house style the in-tree packages use. Two machine
-cards and the host bar under them, with one lit element for the device a guest
-has been given. The design constraint is sixteen pixels: that is what the nav
-renders, and window dots and content lines are mud at that size.
+`assets/icon.svg` — 1024 square, full colour, drawn rather than glyphed. The
+package list is a grid of saturated tiles, and this is the one in the grid that
+is *about* machines, so the machines are objects: a lit cyan screen in front, a
+violet one behind it, and the host they sit on rendered as metal. Green stays
+the single accent, in the host bar, for the device handed to a guest.
+
+The two cards differ in hue because that is the only thing that still separates
+two overlapping rectangles at 32px — a second card in the same colour reads as a
+drop shadow. Everything that did not survive the small sizes was cut: window
+dots, a third card, the empty device slots.
 
 A hub generates the whole rendition ladder (16 → 1024) from one square source,
 and rasterizes an uploaded SVG itself. Put it on a hub in Settings → Packages →

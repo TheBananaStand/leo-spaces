@@ -1,39 +1,56 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="Spaces">
   <!-- Spaces — whole machines on one host.
 
-       House style, matching the in-tree packages: 1024 square, a full-bleed
-       gradient, and a white stroke glyph on a 24-unit grid scaled 21.333× into
-       the middle 512. Keeping to it matters more than being clever: these are
-       seen side by side in one list, and the odd one out reads as broken
-       rather than distinctive.
+       Full colour rather than a white glyph on a tile. The package list is a
+       grid of saturated squares with line art on them, and this one is the
+       thing in the grid that is *about* machines, so the machines are drawn as
+       objects: a lit screen in front, a second one behind it in a different
+       hue, and the host they both sit on rendered as metal rather than as
+       another white outline.
 
-       Graphite rather than another saturated field — hosting is purple, fleet
-       indigo, desk teal — and this one is about metal. The single green
-       element in the base bar is the one piece of colour, because it is the
-       one thing this package says that the others do not: a device on the
-       host handed to exactly one guest.
+       The front card is cyan and the one behind it violet because at 32px the
+       only thing that still separates two overlapping rectangles is hue — a
+       second card in the same colour reads as a drop shadow. The deep indigo
+       field is what makes both of them legible; a light background would lose
+       the cyan.
 
-       Two cards and a bar, and nothing else. The design constraint is 16px:
-       the hub renders this at sixteen pixels in the nav, where window dots and
-       content lines are mud. What survives is a silhouette — a window, a
-       second one behind it, metal underneath. -->
+       Green stays the one accent, in the host bar, for the device handed to a
+       guest. Everything else was cut for smaller sizes: no window dots, no
+       third card, no empty device slots. -->
   <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#4B5563"/>
-      <stop offset="1" stop-color="#111827"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3730A3"/>
+      <stop offset="1" stop-color="#1E1B4B"/>
+    </linearGradient>
+    <linearGradient id="back" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#C4B5FD"/>
+      <stop offset="1" stop-color="#7C3AED"/>
+    </linearGradient>
+    <linearGradient id="front" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7DD3FC"/>
+      <stop offset="1" stop-color="#0284C7"/>
+    </linearGradient>
+    <linearGradient id="metal" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#F9FAFB"/>
+      <stop offset="1" stop-color="#94A3B8"/>
     </linearGradient>
   </defs>
-  <rect width="1024" height="1024" fill="url(#g)"/>
-  <g transform="translate(256,256) scale(21.333)" fill="none" stroke="#ffffff"
-     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-    <!-- The machine in front, with its title bar. -->
-    <rect x="2" y="6" width="14" height="10" rx="2"/>
-    <path d="M2 10h14"/>
-    <!-- The one behind, drawn as the corner that is actually visible. -->
-    <path d="M8 6V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-4"/>
-    <!-- The host they run on. -->
-    <rect x="4" y="19" width="16" height="3" rx="1.2"/>
-    <!-- Its lit element: the device one guest has been given. -->
-    <rect x="6" y="20" width="3" height="1" rx="0.5" fill="#30d158" stroke="none"/>
+
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+
+  <g transform="translate(214,214) scale(24.4)">
+    <!-- The machine behind. Its title band is the only detail it keeps. -->
+    <rect x="9" y="1.2" width="14" height="13" rx="2.4" fill="url(#back)"/>
+    <rect x="9" y="1.2" width="14" height="3.6" rx="2.4" fill="#ffffff" opacity="0.26"/>
+
+    <!-- The machine in front, running something. -->
+    <rect x="0.8" y="5.4" width="15.4" height="11.2" rx="2.4" fill="url(#front)"/>
+    <rect x="0.8" y="5.4" width="15.4" height="3.6" rx="2.4" fill="#ffffff" opacity="0.34"/>
+    <rect x="3.3" y="11.1" width="8.8" height="1.35" rx="0.67" fill="#ffffff" opacity="0.95"/>
+    <rect x="3.3" y="13.7" width="5.4" height="1.35" rx="0.67" fill="#ffffff" opacity="0.6"/>
+
+    <!-- The host underneath, and its one lit element. -->
+    <rect x="2.6" y="19.1" width="18.8" height="3.8" rx="1.7" fill="url(#metal)"/>
+    <rect x="4.9" y="20.4" width="5" height="1.2" rx="0.6" fill="#22C55E"/>
   </g>
 </svg>
