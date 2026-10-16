@@ -242,10 +242,13 @@ two overlapping rectangles at 32px — a second card in the same colour reads as
 drop shadow. Everything that did not survive the small sizes was cut: window
 dots, a third card, the empty device slots.
 
-A hub generates the whole rendition ladder (16 → 1024) from one square source,
-and rasterizes an uploaded SVG itself. Put it on a hub in Settings → Packages →
-Spaces → App Icon, with either file; `scripts/render-icon.sh` regenerates the
-PNG for a box with no rasterizer.
+A hub generates the whole rendition ladder (16 → 512) from one square source.
+Put it on a hub in Settings → Packages → Spaces → App Icon.
+
+**Upload the PNG, not the SVG.** The hub rasterizes an SVG with
+`rsvg-convert`, which a Leo OS image install does not have — the work hub
+answered 500 on the SVG and 200 on the PNG, with no mention of the missing
+binary. `scripts/render-icon.sh` regenerates `assets/icon.png` from the source.
 
 It is a manual step, and that is a gap in Leo rather than a choice here: artwork
 delivered *with* a package only reaches the ladder through a store bundle's
