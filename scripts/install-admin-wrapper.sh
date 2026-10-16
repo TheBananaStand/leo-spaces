@@ -118,8 +118,10 @@ say "verified: $WRAPPER_DST is root-owned and not writable by $SERVICE_USER"
 # account may read and may not write, and only its *contents* travel: the file
 # the admin minted into stays theirs to shred.
 if [ -n "$TOKEN_SRC" ]; then
-  install -o root -g root -m 0755 -d "$CONF_DIR"
-  umask 077
+  # 0750 root:$SERVICE_USER, matching what `leo packages service` creates for a
+  # package's config directory: the account that reads the token may enter the
+  # directory and may not write it, and nobody else sees either.
+  install -o root -g "$SERVICE_USER" -m 0750 -d "$CONF_DIR"
   TTMP=$(mktemp)
   tr -d '\r\n' < "$TOKEN_SRC" > "$TTMP"
   [ -s "$TTMP" ] || { rm -f "$TTMP"; die "$TOKEN_SRC held no token"; }
