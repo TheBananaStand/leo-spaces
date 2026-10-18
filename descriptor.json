@@ -1235,7 +1235,7 @@
   },
   "privileged_helper": {
     "program": "scripts/leo-spaces-admin",
-    "sha256": "7b808078213df6fd0270366f5f5b97a9b2538acf4d03a71956b8be236814988b",
+    "sha256": "db57160692a122479766f6ed38aa084683c913624d03a71956b8be236814988b",
     "purpose": "turn this box into a hypervisor: the packages, libvirt, the guest network and storage, the IOMMU kernel parameters, and binding a PCI device to vfio-pci so a guest can own it",
     "verbs": [
       {
