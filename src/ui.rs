@@ -215,12 +215,25 @@ fn screen() -> Value {
 /// pure glass (`rung: "rail"`), where the default `surface` is the heavier
 /// region a page is *read* on. What names each stretch is its uppercase
 /// section heading, as in LeoCode and Flow.
+///
+/// The width is on a column AROUND the pane, as LeoCode's library has it:
+/// a `panel` always fills the width it is offered (`maxWidth: .infinity`
+/// in both twins), so a `width` on the pane itself was read as nothing
+/// and the rail took half the window.
 fn rail() -> Value {
+    json!({
+        "kind": "vstack",
+        "spacing": 0,
+        "width": RAIL_WIDTH,
+        "children": [ rail_pane() ]
+    })
+}
+
+fn rail_pane() -> Value {
     json!({
         "kind": "panel",
         "label": "",
         "rung": "rail",
-        "width": RAIL_WIDTH,
         "spacing": 2,
         "padding": RAIL_PADDING,
         "children": [

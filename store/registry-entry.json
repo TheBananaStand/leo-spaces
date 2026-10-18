@@ -133,104 +133,110 @@
             {
               "children": [
                 {
-                  "align": "leading",
                   "children": [
                     {
-                      "kind": "text",
-                      "style": "section-label",
-                      "value": "HYPERVISOR"
-                    },
-                    {
-                      "align": "center",
+                      "align": "leading",
                       "children": [
                         {
-                          "colorFrom": "host_status_color",
-                          "kind": "dot",
-                          "size": 8
+                          "kind": "text",
+                          "style": "section-label",
+                          "value": "HYPERVISOR"
                         },
                         {
-                          "bind": "host_status_label",
+                          "align": "center",
+                          "children": [
+                            {
+                              "colorFrom": "host_status_color",
+                              "kind": "dot",
+                              "size": 8
+                            },
+                            {
+                              "bind": "host_status_label",
+                              "kind": "text",
+                              "style": "headline"
+                            }
+                          ],
+                          "kind": "hstack",
+                          "spacing": 8
+                        },
+                        {
+                          "bind": "host_label",
+                          "color": "secondary",
+                          "hideWhenEmpty": true,
                           "kind": "text",
-                          "style": "headline"
+                          "lines": 1,
+                          "style": "mono"
+                        }
+                      ],
+                      "kind": "vstack",
+                      "paddingV": 6,
+                      "spacing": 5
+                    },
+                    {
+                      "children": [
+                        {
+                          "kind": "text",
+                          "style": "section-label",
+                          "value": "MACHINES"
                         }
                       ],
                       "kind": "hstack",
-                      "spacing": 8
+                      "paddingTop": 14
                     },
                     {
-                      "bind": "host_label",
-                      "color": "secondary",
-                      "hideWhenEmpty": true,
-                      "kind": "text",
-                      "lines": 1,
-                      "style": "mono"
-                    }
-                  ],
-                  "kind": "vstack",
-                  "paddingV": 6,
-                  "spacing": 5
-                },
-                {
-                  "children": [
-                    {
-                      "kind": "text",
-                      "style": "section-label",
-                      "value": "MACHINES"
-                    }
-                  ],
-                  "kind": "hstack",
-                  "paddingTop": 14
-                },
-                {
-                  "kind": "searchField",
-                  "placeholder": "Search",
-                  "stateKey": "query",
-                  "width": 196
-                },
-                {
-                  "countBind": "space_count",
-                  "icon": "macwindow",
-                  "kind": "selectRow",
-                  "label": "Spaces",
-                  "stateKey": "tab",
-                  "value": "spaces"
-                },
-                {
-                  "countBind": "setup_count",
-                  "icon": "gearshape",
-                  "kind": "selectRow",
-                  "label": "Settings",
-                  "stateKey": "tab",
-                  "value": "settings"
-                },
-                {
-                  "a11yLabel": "Make a new space",
-                  "action": [
-                    {
-                      "key": "form.name",
-                      "kind": "setState",
-                      "value": ""
+                      "kind": "searchField",
+                      "placeholder": "Search",
+                      "stateKey": "query",
+                      "width": 196
                     },
                     {
-                      "key": "creating",
-                      "kind": "setState",
-                      "value": true
+                      "countBind": "space_count",
+                      "icon": "macwindow",
+                      "kind": "selectRow",
+                      "label": "Spaces",
+                      "stateKey": "tab",
+                      "value": "spaces"
+                    },
+                    {
+                      "countBind": "setup_count",
+                      "icon": "gearshape",
+                      "kind": "selectRow",
+                      "label": "Settings",
+                      "stateKey": "tab",
+                      "value": "settings"
+                    },
+                    {
+                      "a11yLabel": "Make a new space",
+                      "action": [
+                        {
+                          "key": "form.name",
+                          "kind": "setState",
+                          "value": ""
+                        },
+                        {
+                          "key": "creating",
+                          "kind": "setState",
+                          "value": true
+                        }
+                      ],
+                      "icon": "plus",
+                      "kind": "button",
+                      "label": "New space",
+                      "variant": "rail"
+                    },
+                    {
+                      "kind": "spacer"
                     }
                   ],
-                  "icon": "plus",
-                  "kind": "button",
-                  "label": "New space",
-                  "variant": "rail"
-                },
-                {
-                  "kind": "spacer"
+                  "kind": "panel",
+                  "label": "",
+                  "padding": 10,
+                  "rung": "rail",
+                  "spacing": 2
                 }
               ],
-              "kind": "panel",
-              "label": "",
-              "padding": 10,
-              "rung": "rail",
-              "spacing": 2,
+              "kind": "vstack",
+              "spacing": 0,
               "width": 216
             },
             {
