@@ -31,6 +31,22 @@ impl Family {
             Self::Bsd => "bsd",
         }
     }
+
+    /// The family as the sheet's segmented control spells it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Windows => "Windows",
+            Self::Linux => "Linux",
+            Self::Bsd => "BSD",
+        }
+    }
+
+    /// The reverse of [`key`](Self::key), for a family a request names.
+    pub fn from_key(key: &str) -> Option<Self> {
+        [Self::Windows, Self::Linux, Self::Bsd]
+            .into_iter()
+            .find(|f| f.key() == key)
+    }
 }
 
 /// Where the helper can get the installer, when it can.

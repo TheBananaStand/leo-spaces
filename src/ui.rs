@@ -4,12 +4,14 @@
 //! there is no web bundle. The descriptor is the *shape* and never changes;
 //! `data` is everything live, re-read on each load.
 //!
-//! The screen is a master-detail with three tabs, which is the shape the
+//! The screen is a rail beside one of two faces, which is the shape the
 //! subject matter wants: a host either runs guests or needs setting up, and
-//! both readings have to be one glance apart. **Spaces** is the day-to-day
-//! list. **Host setup** is the provisioning plan, derived fresh every time so
-//! a step that became true disappears. **Hardware** is the GPUs and whether
-//! each can be given to a guest.
+//! both readings have to be one glance apart. **Spaces** is the board — every
+//! machine as a tile, and one machine's screen in place of the board when a
+//! tile is opened. **Settings** is the host: the provisioning plan, derived
+//! fresh every time so a step that became true disappears, what the host is,
+//! its graphics devices and whether each can be given to a guest, and the
+//! installer images it holds.
 //!
 //! Every node kind, text style, colour token and action shape here is from the
 //! grammar the two renderers actually implement
@@ -134,7 +136,6 @@ fn screen() -> Value {
         "state": {
             "tab": "spaces",
             "query": "",
-            "selectedId": "",
             // Which machine's screen is open, and the empty string for none.
             // DOTTED on purpose: `DescriptorScope.value(for:)` resolves a token
             // against the payload first and only falls back to page state when
@@ -158,12 +159,11 @@ fn screen() -> Value {
             "form.product_key": "",
             "pair_code": ""
         },
-        // Both are addressable so a space can be linked to directly — which is
-        // what makes "open the CAD machine" a thing the assistant can answer
-        // with a place rather than a description.
-        // A machine's screen is a place: `?tab=console&console.name=engineering`
-        // is a link straight into it.
-        "addressableState": ["tab", "selectedId", "console.name"],
+        // Both are addressable so a machine can be linked to directly — which
+        // is what makes "open the CAD machine" a thing the assistant can
+        // answer with a place rather than a description. A machine's screen is
+        // a place: `?console.name=engineering` is a link straight into it.
+        "addressableState": ["tab", "console.name"],
         // A half-filled form is not an address.
         "ephemeralState": [
             "creating", "form.name", "form.family", "form.os",
@@ -357,10 +357,13 @@ fn board_body() -> Value {
 
 /// One machine, as a tile big enough to read across a room.
 ///
-/// The whole tile taps. On a running guest that opens its screen, which is
-/// what somebody crossing the room came for; on a stopped one it starts it.
-/// Nothing opens a pane — the facts a person actually wants at a glance are
-/// on the face of the tile, and the verbs are on its context menu.
+/// The whole tile taps, and that opens the machine's screen in place of the
+/// board — what somebody crossing the room came for. A stopped machine's
+/// screen says it is off rather than connecting (the console page draws
+/// that), so the tap is the same verb on every tile instead of a different
+/// one by state. Nothing opens a pane — the facts a person actually wants at
+/// a glance are on the face of the tile, and the verbs are on its context
+/// menu.
 ///
 /// Laid out as a zstack so the name sits *over* the field of colour rather
 /// than under it: `zstack` centres its children in both twins, so the overlay
@@ -429,7 +432,7 @@ fn space_tile() -> Value {
                                 "kind": "hstack",
                                 "children": [
                                     { "kind": "spacer" },
-                                    { "kind": "icon", "bind": "os_symbol", "size": 40, "color": "whiteMuted" },
+                                    { "kind": "icon", "bind": "os_symbol", "size": 56, "color": "whiteMuted" },
                                     { "kind": "spacer" }
                                 ]
                             },
@@ -544,7 +547,14 @@ fn console_body() -> Value {
 /// machine is a question the reader has to answer before they can act.
 fn space_menu() -> Value {
     json!([
+        // The same verb the tap is, for whoever reads a menu before a tile;
+        // and the floating window as the second option, because a second
+        // monitor is a real way to use a machine and a pane cannot be
+        // dragged onto one.
         { "label": "Open screen", "icon": "display",
+          "visibleWhen": { "field": "has_console", "equals": "1" },
+          "action": { "kind": "setState", "key": "console.name", "value": "{title}" } },
+        { "label": "Open in window", "icon": "macwindow.on.rectangle",
           "visibleWhen": { "field": "has_console", "equals": "1" },
           "action": { "kind": "openWindow", "route": "/p/spaces/console/{title}", "label": "{title}" } },
         { "label": "Start", "icon": "play",
@@ -863,7 +873,10 @@ fn new_space_sheet() -> Value {
                     "memory_mb": "{form.memory_mb}",
                     "disk_gb": "{form.disk_gb}",
                     "gpu": "{form.gpu}",
-                    "product_key": "{form.product_key}"
+                    "product_key": "{form.product_key}",
+                    // So the server can refuse a system left over from the
+                    // other family's list — see `NewSpace::family`.
+                    "family": "{form.family}"
                 },
                 "refresh": "reload",
                 // The create asked the hub for a pairing code for the new
@@ -916,12 +929,25 @@ fn new_space_sheet() -> Value {
                     "countBind": "standing_label"
                 }
             },
-            { "kind": "text", "bind": "installer_hint", "style": "caption", "color": "muted", "wrap": true },
+            // The one choice on this sheet that changes how many agents the
+            // guest can host, said where it is made. The product key is a
+            // Windows field, so both show only while Windows is the family
+            // picked — a Linux space has no key, and a question that does
+            // not apply is a question the reader has to work out.
+            {
+                "kind": "text",
+                "style": "caption",
+                "color": "muted",
+                "wrap": true,
+                "visibleWhen": { "state": "form.family", "equals": "windows" },
+                "value": "Windows Server allows several interactive sessions at once, so several agents can each drive their own desktop on one guest; Windows 10 and 11 allow one. Server installs as evaluation media, and your key afterwards makes it the full edition."
+            },
             {
                 "kind": "textField",
                 "stateKey": "form.product_key",
                 "label": "Windows product key (optional)",
-                "placeholder": "Blank: installs with a generic key, activate later"
+                "placeholder": "Blank: installs with a generic key, activate later",
+                "visibleWhen": { "state": "form.family", "equals": "windows" }
             },
             sheet_label("SIZE"),
             {
@@ -1038,7 +1064,8 @@ pub fn build_data(f: &Facts, plan: &Plan, spaces: &[Space], is_admin: bool) -> V
         "host_label": if f.hostname.is_empty() { f.host.clone() } else { f.hostname.clone() },
         "unreachable_reason": f.unreachable_reason.clone().unwrap_or_default(),
         "has_gpus": if f.gpus.is_empty() { "0" } else { "1" },
-        "installer_hint": "Windows Server downloads as Microsoft's evaluation media; entering your key after install makes it the full edition. Windows 10 and 11 have no stable download link: fetch the ISO from microsoft.com in a browser, drop it in /var/lib/leo/spaces-import on the host as <id>.iso, and Import adopts it.",
+        // One sentence each; the row for a system says where its image goes.
+        "installer_hint": "Windows Server downloads as Microsoft's evaluation media, and your key after install makes it the full edition. Windows 10 and 11 have no stable download link, so their images are brought by hand.",
 
         // Counts show on the rail rows. The setup count is what is *left*, not
         // the total: a badge of 9 on a finished host reads as nine problems.
@@ -1055,45 +1082,12 @@ fn space_row(sp: &Space, f: &Facts, is_admin: bool) -> Value {
             .map(|g| g.name.clone())
     });
 
-    let mut hardware = vec![
-        ("vCPUs", sp.vcpus.to_string()),
-        ("Memory", format!("{} MB", sp.memory_mb)),
-    ];
-    if let Some(addr) = sp.hostdevs.first() {
-        hardware.push(("GPU", gpu_name.clone().unwrap_or_else(|| addr.clone())));
-    }
-
-    let mut access = Vec::new();
-    if let Some(ip) = &sp.ip {
-        access.push(("Address", ip.clone()));
-    }
-    if let Some(mac) = &sp.mac {
-        access.push(("MAC", mac.clone()));
-    }
-    if let Some(port) = sp.console_port {
-        access.push((
-            "Console",
-            format!(
-                "{} on 127.0.0.1:{}",
-                sp.console_kind.as_deref().unwrap_or("vnc"),
-                port
-            ),
-        ));
-    }
-    // The local admin Leo made at install, for admins only: the pane is the
-    // one place this is ever shown, and a non-admin can see the machine
-    // without being able to sign into it.
-    if is_admin {
-        if let Some(pw) = &sp.admin_password {
-            access.push(("Admin", format!("leo / {pw}")));
-        }
-    }
-
+    // Everything here is read by the tile or its menu. The inspector that
+    // once took a Guest / Hardware / Access breakdown is gone, and a payload
+    // nothing draws is a payload nobody notices going stale.
     json!({
         "id": format!("space-{}", sp.name),
         "tab": "spaces",
-        "kind": "space",
-        "kind_label": "Space",
         "title": sp.name,
         "subtitle": join_dot(&[
             &format!("{} vCPU", sp.vcpus),
@@ -1112,9 +1106,12 @@ fn space_row(sp: &Space, f: &Facts, is_admin: bool) -> Value {
         "os_symbol": os_symbol(&sp.os).to_string(),
         "art_color": os_color(&sp.os).to_string(),
         "gpu_chip": match &gpu_name {
-            Some(n) => short_name(n),
+            Some(n) => crate::facts::short_gpu_name(n),
             None => String::new(),
         },
+        // The local admin Leo made at install, for admins only: the tile is
+        // the one place this is ever shown, and a non-admin can see the
+        // machine without being able to sign into it.
         "admin_line": if is_admin {
             sp.admin_password
                 .as_ref()
@@ -1126,29 +1123,11 @@ fn space_row(sp: &Space, f: &Facts, is_admin: bool) -> Value {
         "badge": sp.state.label(),
         "badge_color": sp.state.color(),
         "state_color": sp.state.color(),
-        "detail_text": format!(
-            "{}{}",
-            os_description(&sp.os),
-            match &gpu_name {
-                Some(n) => format!(" The {} is assigned to this space exclusively.", short_name(n)),
-                None => String::new(),
-            }
-        ),
         // Read by `visibleWhen` on the control buttons. A string rather than a
         // bool because conditions compare against strings.
         "running": if sp.state.is_running() { "on" } else { "off" },
         // A console needs a running guest with an emulated display to show.
         "has_console": if sp.state.is_running() && sp.console_port.is_some() { "1" } else { "0" },
-        "sections": sections(vec![
-            section("Guest", &[
-                ("Name", sp.name.clone()),
-                ("System", os_label(&sp.os).to_string()),
-                ("State", sp.state.label().to_string()),
-                ("Autostart", if sp.autostart { "on".into() } else { "off".into() }),
-            ]),
-            section("Hardware", &hardware.iter().map(|(a, b)| (*a, b.clone())).collect::<Vec<_>>()),
-            section("Access", &access.iter().map(|(a, b)| (*a, b.clone())).collect::<Vec<_>>()),
-        ]),
     })
 }
 
@@ -1262,7 +1241,7 @@ fn gpu_row_data(g: &crate::facts::Gpu, all_gpus: &[crate::facts::Gpu], spaces: &
 
     json!({
         "id": format!("gpu-{}", g.address),
-        "title": short_name(&g.name),
+        "title": g.short_name(),
         "subtitle": subtitle,
         "trailing": g.address,
         "badge": badge,
@@ -1274,7 +1253,9 @@ fn gpu_row_data(g: &crate::facts::Gpu, all_gpus: &[crate::facts::Gpu], spaces: &
 fn installer_row_data(i: &installers::Installer) -> Value {
     use installers::Standing;
     let (badge, color) = match i.standing {
-        Standing::Ready => ("Ready", GREEN),
+        // No badge: the green dot and the size at the trailing edge already
+        // say it, and a column of "Ready" is a status that is always fine.
+        Standing::Ready => ("", GREEN),
         Standing::Downloading => ("Downloading", AMBER),
         Standing::Failed => ("Failed", RED),
         Standing::Fetchable => ("", GRAY),
@@ -1347,7 +1328,7 @@ fn gpu_choices(f: &Facts, spaces: &[Space]) -> Vec<Value> {
         }
         out.push(json!({
             "address": g.address,
-            "label": short_name(&g.name),
+            "label": g.short_name(),
             "note": if g.driver == "vfio-pci" { "" } else { "needs passthrough" }
         }));
     }
@@ -1403,25 +1384,6 @@ fn gb(mb: u64) -> String {
     }
 }
 
-fn sections(list: Vec<Value>) -> Value {
-    // Empty sections are dropped rather than drawn as a heading over nothing.
-    Value::Array(
-        list.into_iter()
-            .filter(|s| s["fields"].as_array().is_some_and(|f| !f.is_empty()))
-            .collect(),
-    )
-}
-
-fn section(title: &str, fields: &[(&str, String)]) -> Value {
-    json!({
-        "title": title,
-        "fields": fields
-            .iter()
-            .map(|(l, v)| json!({ "label": l, "value": v }))
-            .collect::<Vec<_>>()
-    })
-}
-
 fn join_dot(parts: &[&str]) -> String {
     parts
         .iter()
@@ -1436,19 +1398,6 @@ fn first_sentence(s: &str) -> String {
         Some(i) => s[..=i].to_string(),
         None => s.to_string(),
     }
-}
-
-/// "VGA compatible controller: NVIDIA Corporation GA104GL [RTX A4000]" →
-/// "RTX A4000". The bracketed marketing name is the one a person recognises;
-/// the rest is the PCI database being thorough.
-fn short_name(full: &str) -> String {
-    let after_class = full.split(": ").last().unwrap_or(full);
-    if let (Some(a), Some(b)) = (after_class.rfind('['), after_class.rfind(']')) {
-        if a < b {
-            return after_class[a + 1..b].to_string();
-        }
-    }
-    after_class.to_string()
 }
 
 /// A libosinfo short id as a person would say it.
@@ -1494,18 +1443,6 @@ fn os_color(os: &str) -> &'static str {
         "#2c2c30"
     } else {
         "#4a3a2a"
-    }
-}
-
-fn os_description(os: &str) -> String {
-    if os.starts_with("win2k") {
-        // The reason Server is the default, said where somebody choosing a
-        // guest will read it.
-        "Windows Server licenses more than one concurrent interactive session, so several agents can each drive their own desktop on this one guest.".to_string()
-    } else if os.starts_with("win") {
-        "Client Windows allows one interactive session at a time, so this guest hosts one agent. Windows Server is the licensed path to running several in parallel.".to_string()
-    } else {
-        String::new()
     }
 }
 
@@ -1738,9 +1675,7 @@ mod tests {
         let payload = build_data(&f, &plan, &[a_space()], true);
         let rows = payload["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 1);
-        assert!(rows
-            .iter()
-            .all(|r| r["tab"] == "spaces" && r["kind"] == "space"));
+        assert!(rows.iter().all(|r| r["tab"] == "spaces"));
         assert!(!payload["setup_rows"].as_array().unwrap().is_empty());
         assert_eq!(payload["gpu_rows"].as_array().unwrap().len(), 1);
         assert_eq!(
@@ -2057,52 +1992,39 @@ mod tests {
             "the subtitle must not repeat the chip: {}",
             row["subtitle"]
         );
-        assert!(row["detail_text"]
-            .as_str()
-            .unwrap()
-            .contains("concurrent interactive session"));
-
-        let client = Space {
-            os: "win11".into(),
-            hostdevs: vec![],
-            ..a_space()
-        };
-        let payload = build_data(&f, &plan, &[client], true);
-        let row = &payload["rows"].as_array().unwrap()[0];
-        assert!(row["detail_text"]
-            .as_str()
-            .unwrap()
-            .contains("one interactive session"));
-    }
-
-    /// Empty sections are dropped. An "Access" heading over nothing reads as
-    /// missing data rather than as a guest that is switched off.
-    #[test]
-    fn sections_with_no_fields_are_dropped() {
-        let f = facts();
-        let plan = provision::plan(&f);
-        let bare = Space {
-            state: State::Shutoff,
-            ip: None,
-            mac: None,
-            console_port: None,
-            console_kind: None,
-            hostdevs: vec![],
-            ..a_space()
-        };
-        let payload = build_data(&f, &plan, &[bare], true);
-        let row = &payload["rows"].as_array().unwrap()[0];
-        let titles: Vec<&str> = row["sections"]
+        // Said where the choice is made: on the sheet, while Windows is the
+        // family picked, and nowhere a Linux space would have to read it.
+        let sheet = screen()["sheet"].clone();
+        let caption = sheet["fields"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|s| s["title"].as_str().unwrap())
-            .collect();
-        assert!(titles.contains(&"Guest"));
-        assert!(
-            !titles.contains(&"Access"),
-            "an empty Access section should be dropped"
-        );
+            .find(|f| {
+                f["value"]
+                    .as_str()
+                    .is_some_and(|v| v.contains("several interactive sessions"))
+            })
+            .expect("the sheet says what Server licenses that client Windows does not");
+        assert_eq!(caption["visibleWhen"]["state"], "form.family");
+        assert_eq!(caption["visibleWhen"]["equals"], "windows");
+        // And nothing on the row carries a pane's worth of prose any more.
+        assert!(row.get("detail_text").is_none());
+        assert!(row.get("sections").is_none());
+    }
+
+    /// The product key is a Windows question, so it is asked only while
+    /// Windows is the family picked.
+    #[test]
+    fn the_product_key_is_asked_only_for_windows() {
+        let sheet = screen()["sheet"].clone();
+        let key = sheet["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["stateKey"] == "form.product_key")
+            .unwrap();
+        assert_eq!(key["visibleWhen"]["state"], "form.family");
+        assert_eq!(key["visibleWhen"]["equals"], "windows");
     }
 
     /// The sheet's body names exactly the fields `NewSpace` reads (less the
@@ -2119,6 +2041,7 @@ mod tests {
             posted,
             [
                 "disk_gb",
+                "family",
                 "gpu",
                 "memory_mb",
                 "name",
@@ -2144,9 +2067,10 @@ mod tests {
         // And what it posts parses: the form speaks strings.
         let req: spaces::NewSpace = serde_json::from_value(json!({
             "name": "cad", "os": "win2k22", "vcpus": "8", "memory_mb": "16384",
-            "disk_gb": "120", "gpu": "", "product_key": ""
+            "disk_gb": "120", "gpu": "", "product_key": "", "family": "windows"
         }))
         .expect("the sheet's body shape");
+        assert_eq!(req.family.as_deref(), Some("windows"));
         assert_eq!(req.vcpus, 8);
         assert_eq!(req.memory_mb, 16384);
         assert!(req.gpu.is_none(), "an unpicked GPU is no GPU");
@@ -2218,7 +2142,9 @@ mod tests {
         let rows = payload["installer_rows"].as_array().unwrap();
         let by = |id: &str| rows.iter().find(|r| r["id"] == id).unwrap().clone();
 
-        assert_eq!(by("archlinux")["badge"], "Ready");
+        assert_eq!(by("archlinux")["badge"], "", "a ready image wears no badge");
+        assert_eq!(by("archlinux")["state_color"], GREEN);
+        assert_eq!(by("archlinux")["trailing"], "1.2 GB");
         assert_eq!(by("archlinux")["can_fetch"], "0");
         assert_eq!(by("debian13")["badge"], "Failed");
         assert_eq!(
@@ -2263,18 +2189,6 @@ mod tests {
         // This payload has win11 staged, so the picker says so; unstaged it
         // would say "needs the ISO".
         assert_eq!(standing("win11"), "import in Settings");
-    }
-
-    #[test]
-    fn a_name_shortens_to_what_a_person_recognises() {
-        assert_eq!(
-            short_name("VGA compatible controller: NVIDIA Corporation GA104GL [RTX A4000]"),
-            "RTX A4000"
-        );
-        assert_eq!(
-            short_name("3D controller: Some Card 9000"),
-            "Some Card 9000"
-        );
     }
 
     #[test]
@@ -2846,10 +2760,7 @@ mod grammar_tests {
         // And the reverse, which is only a tidiness issue but catches a
         // renamed key leaving its old seed behind.
         for key in &seeded {
-            assert!(
-                used.contains(key) || key == "selectedId",
-                "'{key}' is seeded but nothing reads it"
-            );
+            assert!(used.contains(key), "'{key}' is seeded but nothing reads it");
         }
     }
 

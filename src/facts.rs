@@ -23,6 +23,66 @@ pub struct Function {
     pub driver: String,
 }
 
+/// "VGA compatible controller: NVIDIA Corporation GA104GL [RTX A4000]" →
+/// "RTX A4000". The bracketed marketing name is the one a person recognises;
+/// the rest is the PCI database being thorough.
+///
+/// A card the database has no marketing name for keeps its device name but
+/// loses the vendor's legal one: "ASPEED Technology, Inc. ASPEED Graphics
+/// Family" is "ASPEED Graphics Family", which fits a row title; with the
+/// vendor it was cut off at "Graphi…" in two panels and a setup step.
+///
+/// One function, because the setup step's title and the Graphics row name
+/// the same card, and two spellings of the same shortening drifted once.
+pub fn short_gpu_name(full: &str) -> String {
+    // "VGA compatible controller: " is the class, not the card, and lspci's
+    // "(rev a1)" at the end is the silicon stepping, which no person uses to
+    // tell their cards apart.
+    let s = full.split(": ").last().unwrap_or(full).trim();
+    let s = match s.rfind(" (rev ") {
+        Some(i) if s.ends_with(')') => s[..i].trim(),
+        _ => s,
+    };
+    if let (Some(a), Some(b)) = (s.rfind('['), s.rfind(']')) {
+        if a < b && s[b + 1..].trim().is_empty() {
+            let inner = s[a + 1..b].trim();
+            if !inner.is_empty() {
+                return inner.to_string();
+            }
+        }
+    }
+    // No marketing name. Drop the vendor's legal name, which the database
+    // spells in full, and an alias it puts in brackets ahead of the device
+    // ("Advanced Micro Devices, Inc. [AMD/ATI] Navi 31").
+    let mut rest = s;
+    let cut = [
+        "Corporation ",
+        "Inc. ",
+        "Ltd. ",
+        "Limited ",
+        "LLC ",
+        "GmbH ",
+        "Co. ",
+    ]
+    .iter()
+    .filter_map(|e| rest.find(e).map(|i| i + e.len()))
+    .min();
+    if let Some(i) = cut {
+        rest = &rest[i..];
+    }
+    if rest.starts_with('[') {
+        if let Some(b) = rest.find("] ") {
+            rest = &rest[b + 2..];
+        }
+    }
+    let rest = rest.trim();
+    if rest.is_empty() {
+        s.to_string()
+    } else {
+        rest.to_string()
+    }
+}
+
 /// A discrete graphics device, and whether it can be handed to one guest.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Gpu {
@@ -59,6 +119,11 @@ pub struct Gpu {
 }
 
 impl Gpu {
+    /// The card as a person says it — see [`short_gpu_name`].
+    pub fn short_name(&self) -> String {
+        short_gpu_name(&self.name)
+    }
+
     /// Every `vendor:device` the card is made of — what `bind-vfio` takes.
     pub fn all_ids(&self) -> Vec<&str> {
         let mut v = vec![self.ids.as_str()];
@@ -907,6 +972,55 @@ pub fn probe_blank(host: &Host) -> Facts {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_gpu_name_shortens_to_the_part_a_person_recognises() {
+        assert_eq!(
+            short_gpu_name("VGA compatible controller: NVIDIA Corporation GA104GL [RTX A4000]"),
+            "RTX A4000"
+        );
+        assert_eq!(
+            short_gpu_name(
+                "Advanced Micro Devices, Inc. [AMD/ATI] Granite Ridge [Radeon Graphics]"
+            ),
+            "Radeon Graphics"
+        );
+        // The revision lspci appends is a stepping, not a name — and it
+        // sits after the bracket, so it must not hide the marketing name.
+        assert_eq!(
+            short_gpu_name(
+                "VGA compatible controller: NVIDIA Corporation GA104GL [RTX A4000] (rev a1)"
+            ),
+            "RTX A4000"
+        );
+        assert_eq!(
+            short_gpu_name("ASPEED Technology, Inc. ASPEED Graphics Family (rev 52)"),
+            "ASPEED Graphics Family"
+        );
+        // No brackets: the vendor's legal name goes, the device's stays.
+        assert_eq!(
+            short_gpu_name(
+                "VGA compatible controller: ASPEED Technology, Inc. ASPEED Graphics Family"
+            ),
+            "ASPEED Graphics Family"
+        );
+        assert_eq!(
+            short_gpu_name("Matrox Electronics Systems Ltd. MGA G200eW WPCM450"),
+            "MGA G200eW WPCM450"
+        );
+        // An alias in brackets ahead of the device is the vendor again.
+        assert_eq!(
+            short_gpu_name("Advanced Micro Devices, Inc. [AMD/ATI] Navi 31"),
+            "Navi 31"
+        );
+        // Nothing to strip: fall back to the part after the class.
+        assert_eq!(
+            short_gpu_name("3D controller: Some Card 9000"),
+            "Some Card 9000"
+        );
+        // A name that is only a vendor is better than an empty title.
+        assert_eq!(short_gpu_name("Some Vendor Inc. "), "Some Vendor Inc.");
+    }
+
     use super::*;
 
     /// A device name with brackets and slashes — `[AMD/ATI] Granite Ridge` is

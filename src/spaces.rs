@@ -504,6 +504,14 @@ pub struct NewSpace {
     /// edition is chosen with a generic key and activated later.
     #[serde(default, deserialize_with = "lenient::blank_is_none")]
     pub product_key: Option<String>,
+    /// The family the sheet was showing when Create was pressed — `windows`,
+    /// `linux`, `bsd`. When given, `os` has to belong to it: the picker lists
+    /// one family at a time but the picked id outlives a switch, so with no
+    /// check a person who moved to Linux and pressed Create without touching
+    /// the list got the Windows Server the sheet opened on. The MCP tool and
+    /// a plain API caller name no family and are not second-guessed.
+    #[serde(default, deserialize_with = "lenient::blank_is_none")]
+    pub family: Option<String>,
     /// The guest tools CD, once built — set by `create`, never by a request.
     #[serde(skip)]
     pub guest_tools_iso: Option<String>,
@@ -571,12 +579,24 @@ impl NewSpace {
     /// happens here, where it can be refused with a number in the message.
     pub fn check(&self, f: &Facts, existing: &[Space]) -> Result<(), SpaceError> {
         valid_name(&self.name)?;
-        if crate::catalog::find(&self.os).is_none() {
-            return Err(SpaceError::Refused(format!(
+        let os = crate::catalog::find(&self.os).ok_or_else(|| {
+            SpaceError::Refused(format!(
                 "'{}' is not an operating system this package knows. One of: {}",
                 self.os,
                 crate::catalog::ids().join(", ")
-            )));
+            ))
+        })?;
+        if let Some(family) = &self.family {
+            if os.family.key() != family {
+                let picked = crate::catalog::Family::from_key(family)
+                    .map(|f| f.label().to_string())
+                    .unwrap_or_else(|| family.clone());
+                return Err(SpaceError::Refused(format!(
+                    "{} is {}, but {picked} is the family picked \u{2014} choose a {picked} system from the list",
+                    os.label,
+                    os.family.label(),
+                )));
+            }
         }
         if existing.iter().any(|s| s.name == self.name) {
             return Err(SpaceError::Refused(format!(
@@ -1248,6 +1268,7 @@ mod tests {
             gpu: None,
             product_key: None,
             guest_tools_iso: None,
+            family: None,
         };
         let e = req.check(&f, &existing).expect_err("should refuse");
         let m = e.to_string();
@@ -1257,6 +1278,43 @@ mod tests {
         // A space that is already defined but off still counts, because the
         // operator will start it.
         assert!(req.check(&f, &[]).is_ok(), "fits on an empty host");
+    }
+
+    /// The picker shows one family at a time but the picked id outlives a
+    /// switch: Linux chosen, nothing in its list touched, Create pressed —
+    /// that must not make the Windows Server the sheet opened on.
+    #[test]
+    fn a_system_from_another_family_than_the_one_picked_is_refused() {
+        let f = host_facts();
+        let req = NewSpace {
+            name: "build".into(),
+            os: "win2k22".into(),
+            family: Some("linux".into()),
+            vcpus: 4,
+            memory_mb: 8_192,
+            disk_gb: 60,
+            iso: None,
+            gpu: None,
+            product_key: None,
+            guest_tools_iso: None,
+        };
+        let e = req.check(&f, &[]).expect_err("a Windows id under Linux");
+        assert_eq!(
+            e.to_string(),
+            "Windows Server 2022 is Windows, but Linux is the family picked \u{2014} choose a Linux system from the list"
+        );
+        // The same id under its own family, or with no family named at all
+        // (the MCP tool, a plain API call), is fine.
+        let ok = NewSpace {
+            family: Some("windows".into()),
+            ..req.clone()
+        };
+        assert!(ok.check(&f, &[]).is_ok());
+        let ok = NewSpace {
+            family: None,
+            ..req
+        };
+        assert!(ok.check(&f, &[]).is_ok());
     }
 
     #[test]
@@ -1272,6 +1330,7 @@ mod tests {
             gpu: None,
             product_key: None,
             guest_tools_iso: None,
+            family: None,
         };
         let m = req.check(&f, &[]).expect_err("should refuse").to_string();
         assert!(m.contains("32 or fewer"), "{m}");
@@ -1308,6 +1367,7 @@ mod tests {
             gpu: Some("0000:01:00.0".into()),
             product_key: None,
             guest_tools_iso: None,
+            family: None,
         };
         let m = req
             .check(&f, &existing)
@@ -1332,6 +1392,7 @@ mod tests {
             gpu: Some("0000:01:00.0".into()),
             product_key: None,
             guest_tools_iso: None,
+            family: None,
         };
         let m = req.check(&f, &[]).expect_err("should refuse").to_string();
         assert!(m.contains("console"), "{m}");
@@ -1352,6 +1413,7 @@ mod tests {
             gpu: None,
             product_key: None,
             guest_tools_iso: None,
+            family: None,
         };
         let c = req.command(&f);
         assert!(c.contains("--boot uefi"), "Windows needs UEFI: {c}");
@@ -1390,6 +1452,7 @@ mod tests {
             gpu: Some("0000:01:00.0".into()),
             product_key: None,
             guest_tools_iso: None,
+            family: None,
         };
         let c = req.command(&f);
         assert!(
@@ -1415,6 +1478,7 @@ mod tests {
             gpu: None,
             product_key: None,
             guest_tools_iso: None,
+            family: None,
         };
         assert!(!req.command(&f).contains("guest-tools"));
         req.guest_tools_iso = Some("/var/lib/leo-spaces/iso/guest-tools-cad.iso".into());
@@ -1446,6 +1510,7 @@ mod tests {
             gpu: None,
             product_key: None,
             guest_tools_iso: None,
+            family: None,
         };
         let c = req.command(&f);
         assert!(!c.contains("--tpm"), "{c}");

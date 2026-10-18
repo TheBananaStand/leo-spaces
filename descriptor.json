@@ -99,7 +99,6 @@
     "spaces": {
       "addressableState": [
         "tab",
-        "selectedId",
         "console.name"
       ],
       "assistant": {
@@ -322,7 +321,7 @@
                                       "bind": "os_symbol",
                                       "color": "whiteMuted",
                                       "kind": "icon",
-                                      "size": 40
+                                      "size": 56
                                     },
                                     {
                                       "kind": "spacer"
@@ -420,12 +419,25 @@
                       "trailing": [
                         {
                           "action": {
+                            "key": "console.name",
+                            "kind": "setState",
+                            "value": "{title}"
+                          },
+                          "icon": "display",
+                          "label": "Open screen",
+                          "visibleWhen": {
+                            "equals": "1",
+                            "field": "has_console"
+                          }
+                        },
+                        {
+                          "action": {
                             "kind": "openWindow",
                             "label": "{title}",
                             "route": "/p/spaces/console/{title}"
                           },
-                          "icon": "display",
-                          "label": "Open screen",
+                          "icon": "macwindow.on.rectangle",
+                          "label": "Open in window",
                           "visibleWhen": {
                             "equals": "1",
                             "field": "has_console"
@@ -1069,17 +1081,25 @@
             "spacing": 2
           },
           {
-            "bind": "installer_hint",
             "color": "muted",
             "kind": "text",
             "style": "caption",
+            "value": "Windows Server allows several interactive sessions at once, so several agents can each drive their own desktop on one guest; Windows 10 and 11 allow one. Server installs as evaluation media, and your key afterwards makes it the full edition.",
+            "visibleWhen": {
+              "equals": "windows",
+              "state": "form.family"
+            },
             "wrap": true
           },
           {
             "kind": "textField",
             "label": "Windows product key (optional)",
             "placeholder": "Blank: installs with a generic key, activate later",
-            "stateKey": "form.product_key"
+            "stateKey": "form.product_key",
+            "visibleWhen": {
+              "equals": "windows",
+              "state": "form.family"
+            }
           },
           {
             "kind": "text",
@@ -1177,6 +1197,7 @@
           "action": {
             "body": {
               "disk_gb": "{form.disk_gb}",
+              "family": "{form.family}",
               "gpu": "{form.gpu}",
               "memory_mb": "{form.memory_mb}",
               "name": "{form.name}",
@@ -1222,7 +1243,6 @@
         "form.vcpus": "8",
         "pair_code": "",
         "query": "",
-        "selectedId": "",
         "tab": "spaces"
       },
       "title": "Spaces"

@@ -365,7 +365,7 @@ pub fn plan(f: &Facts) -> Plan {
         };
         steps.push(Step {
             id: format!("vfio:{}", gpu.address),
-            title: format!("Pass through {}", short_gpu_name(&gpu.name)),
+            title: format!("Pass through {}", gpu.short_name()),
             detail: format!(
                 "Binds {} ({}) to vfio-pci at boot so one space can own it outright. {} Needs a reboot.{standing}",
                 gpu.all_addresses().join(" + "),
@@ -449,26 +449,6 @@ pub fn privilege_handover(f: &Facts) -> String {
             if f.hostname.is_empty() { "the host" } else { &f.hostname }
         )
     }
-}
-
-/// `VGA compatible controller: NVIDIA Corporation GA104GL [RTX A4000]` → `RTX A4000`
-///
-/// The bracketed marketing name is the one a person recognises; the rest is
-/// PCI class boilerplate that makes every GPU row read the same.
-fn short_gpu_name(full: &str) -> String {
-    if let Some(start) = full.rfind('[') {
-        if let Some(end) = full[start..].find(']') {
-            let inner = &full[start + 1..start + end];
-            if !inner.is_empty() {
-                return inner.to_string();
-            }
-        }
-    }
-    full.split(':')
-        .next_back()
-        .unwrap_or(full)
-        .trim()
-        .to_string()
 }
 
 /// Look up a step by id in a freshly derived plan.
@@ -929,26 +909,6 @@ mod tests {
         assert!(step(&p, "group").unwrap().satisfied);
         // The IOMMU is still off, and that is still correctly pending.
         assert!(!step(&p, "iommu").unwrap().satisfied);
-    }
-
-    #[test]
-    fn a_gpu_name_shortens_to_the_part_a_person_recognises() {
-        assert_eq!(
-            short_gpu_name("VGA compatible controller: NVIDIA Corporation GA104GL [RTX A4000]"),
-            "RTX A4000"
-        );
-        assert_eq!(
-            short_gpu_name(
-                "Advanced Micro Devices, Inc. [AMD/ATI] Granite Ridge [Radeon Graphics]"
-            ),
-            "Radeon Graphics"
-        );
-        // No brackets: fall back to the last colon-separated part rather than
-        // returning the PCI class boilerplate.
-        assert_eq!(
-            short_gpu_name("3D controller: Some Card 9000"),
-            "Some Card 9000"
-        );
     }
 
     /// The IOMMU step must name the right parameter for the host's CPU.
