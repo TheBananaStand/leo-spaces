@@ -96,6 +96,9 @@ pub struct Space {
     pub console_kind: Option<String>,
     /// What the title field says this guest is, as set at creation.
     pub os: String,
+    /// The local admin password Leo made for the guest, when this process
+    /// can read it on the host (its own staging directory).
+    pub admin_password: Option<String>,
 }
 
 impl Space {
@@ -186,9 +189,16 @@ $V list --all --name 2>/dev/null | while read -r name; do
       CPU\(s\):*)  printf 'vcpus\t%s\n' "${line#CPU\(s\):}" ;;
       "Max memory:"*) printf 'memory\t%s\n' "${line#Max memory:}" ;;
       Autostart:*) printf 'autostart\t%s\n' "${line#Autostart:}" ;;
-      Title:*)     printf 'os\t%s\n' "${line#Title:}" ;;
     esac
   done
+  # The title is where this app records which OS a space is, and `dominfo`
+  # does NOT print one — not on libvirt 10, whatever older versions did. The
+  # `Title:*` case above matched nothing, so every space read back with an
+  # empty `os`: "Unknown" on every row, every tile a neutral field, and the
+  # OS picked at create time silently discarded. `desc --title` is the one
+  # command that answers. One more local call per domain, inside the same
+  # SSH round trip the probe already pays for.
+  printf 'os\t%s\n' "$($V desc "$name" --title 2>/dev/null | head -1)"
   # One dumpxml, grepped several ways: the XML is the only place the assigned
   # devices and the graphics port both appear.
   xml=$($V dumpxml "$name" 2>/dev/null)
@@ -212,8 +222,12 @@ $V list --all --name 2>/dev/null | while read -r name; do
   printf '%s\n' "$xml" | sed -n "s/.*<mac address='\([^']*\)'.*/mac\t\1/p" | head -1
   # domifaddr needs the guest agent or a DHCP lease; silence means no address,
   # which is an ordinary state for a guest that is off.
-  $V domifaddr "$name" --source lease 2>/dev/null \
-    | awk '/ipv4/ { split($4, a, "/"); printf "ip\t%s\n", a[1]; exit }'
+  { $V domifaddr "$name" --source lease 2>/dev/null; $V domifaddr "$name" --source agent 2>/dev/null; } \
+    | awk '/ipv4/ && $4 !~ /^127\./ { split($4, a, "/"); printf "ip\t%s\n", a[1]; exit }'
+  # The admin password this process made for the guest, from its own staging
+  # directory on the host (leo's, 0600) — for the pane to show an admin.
+  pw=/var/lib/leo/spaces-import/guest-tools/$name/admin-password.txt
+  [ -r "$pw" ] && printf 'admin_pw\t%s\n' "$(head -c 64 "$pw")"
 done
 "#;
 
@@ -252,6 +266,7 @@ pub fn parse_list(stdout: &str) -> Vec<Space> {
                 memory_mb: 0,
                 autostart: false,
                 hostdevs: Vec::new(),
+                admin_password: None,
                 ip: None,
                 mac: None,
                 console_port: None,
@@ -280,6 +295,7 @@ pub fn parse_list(stdout: &str) -> Vec<Space> {
             }
             "autostart" => s.autostart = v.eq_ignore_ascii_case("enable"),
             "os" => s.os = v.to_string(),
+            "admin_pw" => s.admin_password = Some(v.to_string()).filter(|p| !p.is_empty()),
             "hostdev" => {
                 // The awk half emits the hex groups unpadded; sysfs pads them.
                 if let Some(a) = pad_pci(v) {
@@ -378,7 +394,6 @@ impl Action {
             _ => return None,
         })
     }
-
 }
 
 pub async fn control(host: &Host, name: &str, action: Action) -> Result<String, SpaceError> {
@@ -386,6 +401,9 @@ pub async fn control(host: &Host, name: &str, action: Action) -> Result<String, 
     let out = host
         .run(&format!("{VIRSH} {} {name}", action.verb()))
         .await?;
+    if out.ok() && action == Action::Start && first_installer_boot(host, name).await {
+        tokio::spawn(press_any_key(host.clone(), name.to_string()));
+    }
     if !out.ok() {
         let msg = out.failure();
         // libvirt's own words are better than anything this layer could write,
@@ -398,25 +416,132 @@ pub async fn control(host: &Host, name: &str, action: Action) -> Result<String, 
     Ok(out.trimmed().to_string())
 }
 
+/// Whether this start is the first boot of a Windows install this app
+/// staged — once, by the marker it leaves. Windows media boots with "Press
+/// any key to boot from CD or DVD" and falls through to the (empty) disk
+/// after five seconds, which on a fresh space is a firmware prompt nobody
+/// is watching. Every later boot must NOT answer it: the CD stays attached
+/// with first boot order, and a keypress there would re-enter Setup on a
+/// machine that is already installed.
+async fn first_installer_boot(host: &Host, name: &str) -> bool {
+    host.run(&first_boot_probe(name))
+        .await
+        .map(|o| o.ok() && o.trimmed().trim() == "yes")
+        .unwrap_or(false)
+}
+
+/// One command, so the check and the mark cannot race two starts: yes only
+/// when the staging has a Windows answer file and no marker yet.
+fn first_boot_probe(name: &str) -> String {
+    let staging = crate::guest_tools::staging_dir(name);
+    format!(
+        "test -f '{staging}/autounattend.xml' && ! test -f '{staging}/.first-boot' && touch '{staging}/.first-boot' && echo yes"
+    )
+}
+
+/// Answer the installer's "Press any key" for the window it is on screen:
+/// twice a second from the first second to the twelfth. Enter is ignored
+/// by the firmware before the prompt, so starting early is free; stopping
+/// early is what matters, because Setup's own window is up within twenty
+/// seconds of the prompt on a fast host and an Enter there lands on its
+/// focused button — which was Cancel, once, measured. The prompt itself
+/// is up from about the third second to the eighth.
+async fn press_any_key(host: Host, name: String) {
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    for _ in 0..PRESS_ANY_KEY_PRESSES {
+        if host
+            .run(&format!("{VIRSH} send-key {name} KEY_ENTER"))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+/// Presses, half a second apart, after the first second: eleven seconds.
+const PRESS_ANY_KEY_PRESSES: u32 = 22;
+
+/// The second the last Enter lands on, counting from start — twice a second
+/// from the first.
+///
+/// Checked here at compile time rather than asserted in a test: both sides
+/// are constants, so there is nothing a test run can learn that the compiler
+/// cannot, and `assert!` on a constant is a lint besides. The window has to
+/// close well before Setup's own window is up (~20 s) and open after OVMF
+/// has drawn the prompt (~3 s).
+const LAST_PRESS_SECS: u32 = 1 + PRESS_ANY_KEY_PRESSES / 2;
+const _: () = assert!(LAST_PRESS_SECS >= 9 && LAST_PRESS_SECS <= 14);
+
 /// What a new space should be.
+///
+/// The numbers accept a string as well as a number, and the two optionals
+/// treat `""` as absent: the New-space sheet interpolates page state into its
+/// request body, and page state is strings. A form that could only be
+/// submitted by a client that knew to coerce is a form only the MCP tool can
+/// fill in.
 #[derive(Debug, Clone, Deserialize)]
 pub struct NewSpace {
     pub name: String,
-    /// A libosinfo short id: `win2k22`, `win11`, `win10`, `linux2022` …
+    /// A libosinfo short id from [`crate::catalog`]: `win2k22`, `ubuntu24.04` …
     #[serde(default = "default_os")]
     pub os: String,
-    #[serde(default = "default_vcpus")]
+    #[serde(default = "default_vcpus", deserialize_with = "lenient::u32")]
     pub vcpus: u32,
-    #[serde(default = "default_memory")]
+    #[serde(default = "default_memory", deserialize_with = "lenient::u64")]
     pub memory_mb: u64,
-    #[serde(default = "default_disk")]
+    #[serde(default = "default_disk", deserialize_with = "lenient::u64")]
     pub disk_gb: u64,
-    /// Installer image, as a path on the host.
-    #[serde(default)]
+    /// Installer image, as a path on the host. Absent means the catalog's
+    /// file for `os`, which has to be on the host already.
+    #[serde(default, deserialize_with = "lenient::blank_is_none")]
     pub iso: Option<String>,
     /// PCI address of a GPU to hand over exclusively.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient::blank_is_none")]
     pub gpu: Option<String>,
+    /// A Windows product key, for the unattended install. Blank means the
+    /// edition is chosen with a generic key and activated later.
+    #[serde(default, deserialize_with = "lenient::blank_is_none")]
+    pub product_key: Option<String>,
+    /// The guest tools CD, once built — set by `create`, never by a request.
+    #[serde(skip)]
+    pub guest_tools_iso: Option<String>,
+}
+
+mod lenient {
+    use serde::{Deserialize, Deserializer};
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        Num(u64),
+        Str(String),
+    }
+
+    fn number<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+        match NumOrStr::deserialize(d)? {
+            NumOrStr::Num(n) => Ok(n),
+            NumOrStr::Str(s) => s
+                .trim()
+                .parse()
+                .map_err(|_| serde::de::Error::custom(format!("'{s}' is not a whole number"))),
+        }
+    }
+
+    pub fn u64<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+        number(d)
+    }
+
+    pub fn u32<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+        let n = number(d)?;
+        u32::try_from(n).map_err(|_| serde::de::Error::custom(format!("{n} is too large")))
+    }
+
+    pub fn blank_is_none<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+        let v: Option<String> = Option::deserialize(d)?;
+        Ok(v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
+    }
 }
 
 /// Windows Server, not Windows 11, and the reason is the whole multi-agent story.
@@ -446,6 +571,13 @@ impl NewSpace {
     /// happens here, where it can be refused with a number in the message.
     pub fn check(&self, f: &Facts, existing: &[Space]) -> Result<(), SpaceError> {
         valid_name(&self.name)?;
+        if crate::catalog::find(&self.os).is_none() {
+            return Err(SpaceError::Refused(format!(
+                "'{}' is not an operating system this package knows. One of: {}",
+                self.os,
+                crate::catalog::ids().join(", ")
+            )));
+        }
         if existing.iter().any(|s| s.name == self.name) {
             return Err(SpaceError::Refused(format!(
                 "a space named '{}' already exists",
@@ -457,7 +589,7 @@ impl NewSpace {
             let known = f.gpus.iter().find(|g| &g.address == gpu).ok_or_else(|| {
                 SpaceError::Refused(format!("{gpu} is not a graphics device on this host"))
             })?;
-            let blockers = known.passthrough_blockers();
+            let blockers = known.passthrough_blockers(&f.gpus);
             if !blockers.is_empty() {
                 return Err(SpaceError::Refused(format!(
                     "{gpu} cannot be passed through: {}",
@@ -478,7 +610,9 @@ impl NewSpace {
             }
         }
         if self.vcpus == 0 {
-            return Err(SpaceError::Refused("a space needs at least one vCPU".into()));
+            return Err(SpaceError::Refused(
+                "a space needs at least one vCPU".into(),
+            ));
         }
         if f.cpu_threads > 0 && self.vcpus > f.cpu_threads {
             return Err(SpaceError::Refused(format!(
@@ -519,6 +653,38 @@ impl NewSpace {
         Ok(())
     }
 
+    /// The same request with its installer named: the path given, or the
+    /// catalog's file for the OS when it is on the host — and a refusal that
+    /// says where to get it when it is not. Defining a guest with no
+    /// installer attached is a guest that boots to a UEFI shell, which reads
+    /// as "the VM is broken" rather than "nothing to install from".
+    pub fn with_installer(&self, f: &Facts) -> Result<NewSpace, SpaceError> {
+        if self.iso.is_some() {
+            return Ok(self.clone());
+        }
+        let os = crate::catalog::find(&self.os).ok_or_else(|| {
+            SpaceError::Refused(format!("'{}' is not in the OS catalog", self.os))
+        })?;
+        if !f.has_iso(os.iso_file) {
+            let how = if os.source.is_some() {
+                "download it under Settings › Installers".to_string()
+            } else {
+                format!(
+                    "it is licensed, so put the image at {} yourself",
+                    os.iso_path()
+                )
+            };
+            return Err(SpaceError::Refused(format!(
+                "no installer for {} on the host — {how}",
+                os.label
+            )));
+        }
+        Ok(NewSpace {
+            iso: Some(os.iso_path()),
+            ..self.clone()
+        })
+    }
+
     /// The `virt-install` invocation that defines this space.
     ///
     /// Built as a string and kept inspectable: the UI and the MCP tool both
@@ -554,6 +720,10 @@ impl NewSpace {
             "--graphics vnc,listen=127.0.0.1".to_string(),
             "--video qxl".to_string(),
             "--console pty,target_type=serial".to_string(),
+            // The guest agent's channel: with the agent in (the virtio
+            // guest tools install it) the pane learns the guest's address
+            // and a shutdown is a request the guest honours, not a cord.
+            "--channel unix,target.type=virtio,name=org.qemu.guest_agent.0".to_string(),
             // Define it; do not boot it, and do not block waiting for an
             // install to finish. The operator starts it when they are ready.
             "--noautoconsole --noreboot --wait 0".to_string(),
@@ -580,14 +750,38 @@ impl NewSpace {
             ));
         }
 
+        // The Leo guest tools: the satellite and its installer, on a CD of
+        // their own, so the guest becomes a machine agents can drive without
+        // downloading anything from inside it. See `guest_tools`.
+        if let Some(iso) = &self.guest_tools_iso {
+            c.push(format!("--disk path={iso},device=cdrom"));
+        }
+
         if let Some(gpu) = &self.gpu {
-            c.push(format!("--hostdev {gpu},address.type=pci"));
-            // A passed-through card is the guest's display. Leaving qxl in as
-            // well gives Windows two adapters and it picks the emulated one,
-            // which is how a passthrough that worked looks like one that did
-            // not.
-            if let Some(i) = c.iter().position(|a| a == "--video qxl") {
-                c[i] = "--video none".into();
+            // The emulated display STAYS. It used to be dropped here so Windows
+            // would not pick it over the card — but with the card's ROM off
+            // (below) the firmware console and the installer are on the
+            // emulated display, which is the only thing the console in the
+            // window can show. The card is the guest's second adapter until
+            // its driver is in; then it is the one that matters.
+            //
+            // The whole card: VFIO claims the group, and a function left out
+            // is a group that is "not viable" when the guest starts.
+            let addresses: Vec<&str> = f
+                .gpus
+                .iter()
+                .find(|g| &g.address == gpu)
+                .map(|g| g.all_addresses())
+                .unwrap_or_else(|| vec![gpu.as_str()]);
+            // `rom.bar=off`: the card's own option ROM is not mapped, so the
+            // firmware keeps its boot console on the emulated display and the
+            // console in the window shows the installer. With the ROM on,
+            // OVMF takes the card's GOP and everything up to the driver loading
+            // draws on the card's physical ports — a black console on a
+            // machine that is booting perfectly well. The guest driver maps
+            // the card itself once it is running; nothing is lost.
+            for a in addresses {
+                c.push(format!("--hostdev {a},address.type=pci,rom.bar=off"));
             }
         }
 
@@ -601,22 +795,150 @@ impl NewSpace {
 }
 
 /// Define a new space. Does not start it.
+/// What `create` hands back beyond the definition: the pairing the sheet's
+/// next action approves, and the password the pane shows once.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct Created {
+    pub message: String,
+    /// A hub pairing code awaiting the admin's approval, or `""` when the CD
+    /// was not built. The create reply carries it so the sheet's chained
+    /// action can approve it with the caller's own session.
+    pub pairing_code: String,
+    pub admin_password: Option<String>,
+    /// Everything `finish_pairing` needs, when there is a code to finish.
+    #[serde(skip)]
+    pub pairing: Option<crate::guest_tools::GuestPlan>,
+    #[serde(skip)]
+    pub hub: String,
+}
+
 pub async fn create(
     host: &Host,
     f: &Facts,
     req: &NewSpace,
-) -> Result<String, SpaceError> {
+    guest_hub: Option<&str>,
+    leo_api_url: &str,
+) -> Result<Created, SpaceError> {
     let existing = list(host).await.unwrap_or_default();
     req.check(f, &existing)?;
+    let mut req = req.with_installer(f)?;
+    // The guest tools CD, built before the guest exists so it is attached at
+    // definition. A CD that cannot be built is said, not fatal.
+    let hub = crate::guest_tools::hub_host(host, guest_hub).await?;
+    let plan = crate::guest_tools::GuestPlan {
+        os: req.os.clone(),
+        product_key: req.product_key.clone(),
+        admin_password: crate::guest_tools::new_password(),
+        satellite_env: None,
+    };
+    let tools = crate::guest_tools::build(host, f, &req.name, &hub, &plan).await?;
+    let mut note = String::new();
+    let mut built = false;
+    match tools {
+        Ok(iso) => {
+            req.guest_tools_iso = Some(iso);
+            built = true;
+        }
+        Err(why) => note = format!(" ({why})"),
+    }
     let out = host.run(&req.command(f).replace(" \\\n ", " ")).await?;
     if !out.ok() {
         return Err(SpaceError::Libvirt(out.failure()));
     }
-    Ok(format!("space '{}' defined", req.name))
+    // The pairing is asked for only once the guest exists: a code for a
+    // space whose definition was refused would be a device nobody made.
+    // Asked for even when the CD could not be built — the sheet's next
+    // action approves whatever code this answers, and an empty one would be
+    // an approve posted to nothing.
+    let pairing_code = crate::guest_tools::request_pairing(leo_api_url, &req.name)
+        .await
+        .unwrap_or_default();
+    Ok(Created {
+        message: format!("space '{}' defined{note}", req.name),
+        pairing_code,
+        admin_password: built.then(|| plan.admin_password.clone()),
+        pairing: Some(plan),
+        hub,
+    })
+}
+
+/// Build (or rebuild) the guest tools CD for an existing space and attach
+/// it — live when the space is running, and in its definition either way.
+pub async fn attach_guest_tools(
+    host: &Host,
+    f: &Facts,
+    name: &str,
+    guest_hub: Option<&str>,
+) -> Result<String, SpaceError> {
+    valid_name(name)?;
+    let space = get(host, name).await?;
+    let hub = crate::guest_tools::hub_host(host, guest_hub).await?;
+    let plan = crate::guest_tools::GuestPlan {
+        os: space.os.clone(),
+        product_key: None,
+        admin_password: crate::guest_tools::new_password(),
+        satellite_env: None,
+    };
+    let iso = match crate::guest_tools::build(host, f, name, &hub, &plan).await? {
+        Ok(iso) => iso,
+        Err(why) => return Err(SpaceError::Refused(why.to_string())),
+    };
+    // The next free unit on the SATA controller the space already has
+    // (sda/sdb are the installer and the virtio drivers), and said to be
+    // SATA: a bare `sd*` target is taken as SCSI, which means a new
+    // virtio-scsi controller, which means a new PCI slot — and a running
+    // q35 guest has none to give ("No more available PCI slots"). A high
+    // letter like `sdz` fails the same way via a second SATA controller.
+    // `--config` only: a SATA device cannot be hot-plugged, so a running
+    // space sees the CD at its next restart — said in the reply.
+    let out = host
+        .run(&format!(
+            "set -e; used=$({VIRSH} domblklist {name} | awk 'NR>2 {{print $1}}'); t=''; for c in sdc sdd sde sdf; do echo \"$used\" | grep -qx $c || {{ t=$c; break; }}; done; [ -n \"$t\" ] || {{ echo 'no free CD-ROM slot (sdc-sdf all taken)' >&2; exit 1; }}; {VIRSH} attach-disk {name} {iso} $t --targetbus sata --type cdrom --mode readonly --config 2>&1"
+        ))
+        .await?;
+    if !out.ok() {
+        return Err(SpaceError::Libvirt(out.failure()));
+    }
+    Ok(format!(
+        "guest tools CD attached to '{name}' (pairs with {hub}){}",
+        if space.state.is_running() {
+            " — it appears at the next restart; a CD cannot be hot-plugged"
+        } else {
+            ""
+        }
+    ))
 }
 
 /// Remove a space, and optionally the disk with it.
 ///
+/// The volumes that are the space's own: its disk and its guest tools CD.
+/// `undefine` is told these by path — never `--remove-all-storage`, which
+/// takes every volume the domain had attached, and a space has the shared
+/// installer images (`win11.iso`, `virtio-win.iso`) attached as CD-ROMs.
+/// Deleting one space took them out from under every other one once.
+fn own_volumes(name: &str) -> [String; 2] {
+    [
+        format!("{STATE_DIR}/disks/{name}.qcow2"),
+        crate::guest_tools::iso_path(name),
+    ]
+}
+
+/// The `undefine` command. With the disk going, each own volume is passed
+/// only when the domain still has it attached (a space whose CD never
+/// built has no CD to delete, and virsh refuses a `--storage` it cannot
+/// find).
+fn undefine_command(name: &str, keep_disk: bool) -> String {
+    if keep_disk {
+        return format!("{VIRSH} undefine {name} --nvram");
+    }
+    // `--storage` is one comma-separated list; given twice virsh refuses
+    // ("option --storage already seen").
+    format!(
+        "s=''; for p in {}; do {VIRSH} domblklist {name} | grep -qF \"$p\" && s=\"$s${{s:+,}}$p\"; done; {VIRSH} undefine {name} --nvram ${{s:+--storage $s}}",
+        own_volumes(name).join(" ")
+    )
+}
+
 /// `--nvram` is not optional in practice: a UEFI guest has per-domain firmware
 /// variables, and undefining without them leaves a file behind that makes
 /// re-creating a space with the same name fail on a name collision nothing
@@ -629,16 +951,17 @@ pub async fn delete(host: &Host, name: &str, keep_disk: bool) -> Result<String, 
             "'{name}' is running — shut it down before deleting it"
         )));
     }
-    let storage = if keep_disk { "" } else { " --remove-all-storage" };
-    let out = host
-        .run(&format!("{VIRSH} undefine {name} --nvram{storage}"))
-        .await?;
+    let out = host.run(&undefine_command(name, keep_disk)).await?;
     if !out.ok() {
         return Err(SpaceError::Libvirt(out.failure()));
     }
     Ok(format!(
         "space '{name}' removed{}",
-        if keep_disk { ", disk kept" } else { " with its disk" }
+        if keep_disk {
+            ", disk kept"
+        } else {
+            " with its disk"
+        }
     ))
 }
 
@@ -659,12 +982,11 @@ pub async fn set_gpu(
     match gpu {
         Some(addr) => {
             valid_pci(addr)?;
-            let known = f
-                .gpus
-                .iter()
-                .find(|g| g.address == addr)
-                .ok_or_else(|| SpaceError::Refused(format!("{addr} is not a GPU on this host")))?;
-            let blockers = known.passthrough_blockers();
+            let known =
+                f.gpus.iter().find(|g| g.address == addr).ok_or_else(|| {
+                    SpaceError::Refused(format!("{addr} is not a GPU on this host"))
+                })?;
+            let blockers = known.passthrough_blockers(&f.gpus);
             if !blockers.is_empty() {
                 return Err(SpaceError::Refused(format!(
                     "{addr} cannot be passed through: {}",
@@ -681,17 +1003,21 @@ pub async fn set_gpu(
                     holder.name
                 )));
             }
-            let (dom, bus, slot, func) = split_pci(addr)?;
-            let xml = format!(
-                "<hostdev mode='subsystem' type='pci' managed='yes'><source><address domain='0x{dom}' bus='0x{bus}' slot='0x{slot}' function='0x{func}'/></source></hostdev>"
-            );
-            let out = host
-                .run(&format!(
-                    "printf '%s' \"{xml}\" > /tmp/leo-spaces-hostdev.xml && {VIRSH} attach-device {name} /tmp/leo-spaces-hostdev.xml --config; rc=$?; rm -f /tmp/leo-spaces-hostdev.xml; exit $rc"
-                ))
-                .await?;
-            if !out.ok() {
-                return Err(SpaceError::Libvirt(out.failure()));
+            // Every function of the card, not just the display — see
+            // `NewSpace::command`, including why the ROM is off.
+            for a in known.all_addresses() {
+                let (dom, bus, slot, func) = split_pci(a)?;
+                let xml = format!(
+                    "<hostdev mode='subsystem' type='pci' managed='yes'><source><address domain='0x{dom}' bus='0x{bus}' slot='0x{slot}' function='0x{func}'/></source><rom bar='off'/></hostdev>"
+                );
+                let out = host
+                    .run(&format!(
+                        "printf '%s' \"{xml}\" > /tmp/leo-spaces-hostdev.xml && {VIRSH} attach-device {name} /tmp/leo-spaces-hostdev.xml --config; rc=$?; rm -f /tmp/leo-spaces-hostdev.xml; exit $rc"
+                    ))
+                    .await?;
+                if !out.ok() {
+                    return Err(SpaceError::Libvirt(out.failure()));
+                }
             }
             Ok(format!(
                 "{addr} assigned to '{name}'{}",
@@ -703,24 +1029,30 @@ pub async fn set_gpu(
             ))
         }
         None => {
-            let Some(addr) = space.hostdevs.first().cloned() else {
+            if space.hostdevs.is_empty() {
                 return Err(SpaceError::Refused(format!(
                     "'{name}' has no device assigned"
                 )));
-            };
-            let (dom, bus, slot, func) = split_pci(&addr)?;
-            let xml = format!(
-                "<hostdev mode='subsystem' type='pci' managed='yes'><source><address domain='0x{dom}' bus='0x{bus}' slot='0x{slot}' function='0x{func}'/></source></hostdev>"
-            );
-            let out = host
-                .run(&format!(
-                    "printf '%s' \"{xml}\" > /tmp/leo-spaces-hostdev.xml && {VIRSH} detach-device {name} /tmp/leo-spaces-hostdev.xml --config; rc=$?; rm -f /tmp/leo-spaces-hostdev.xml; exit $rc"
-                ))
-                .await?;
-            if !out.ok() {
-                return Err(SpaceError::Libvirt(out.failure()));
             }
-            Ok(format!("{addr} released from '{name}'"))
+            // All of them: the card went in as several functions.
+            for addr in &space.hostdevs {
+                let (dom, bus, slot, func) = split_pci(addr)?;
+                let xml = format!(
+                    "<hostdev mode='subsystem' type='pci' managed='yes'><source><address domain='0x{dom}' bus='0x{bus}' slot='0x{slot}' function='0x{func}'/></source></hostdev>"
+                );
+                let out = host
+                    .run(&format!(
+                        "printf '%s' \"{xml}\" > /tmp/leo-spaces-hostdev.xml && {VIRSH} detach-device {name} /tmp/leo-spaces-hostdev.xml --config; rc=$?; rm -f /tmp/leo-spaces-hostdev.xml; exit $rc"
+                    ))
+                    .await?;
+                if !out.ok() {
+                    return Err(SpaceError::Libvirt(out.failure()));
+                }
+            }
+            Ok(format!(
+                "{} released from '{name}'",
+                space.hostdevs.join(", ")
+            ))
         }
     }
 }
@@ -739,7 +1071,8 @@ pub async fn snapshot(host: &Host, name: &str, label: &str) -> Result<String, Sp
     valid_name(name)?;
     valid_name(label).map_err(|_| {
         SpaceError::Refused(
-            "a snapshot label may use lowercase letters, digits, dashes and underscores only".into(),
+            "a snapshot label may use lowercase letters, digits, dashes and underscores only"
+                .into(),
         )
     })?;
     let out = host
@@ -787,6 +1120,7 @@ mod tests {
             group_siblings: vec![],
             is_boot_vga: false,
             integrated: false,
+            functions: vec![],
         }];
         f
     }
@@ -853,14 +1187,14 @@ mod tests {
         assert!(valid_name("sim_01").is_ok());
         for bad in [
             "",
-            "Win-CAD",             // uppercase: libvirt allows it, paths get confusing
-            "win cad",             // space
-            "win;rm -rf /",        // command separator
-            "win$(id)",            // substitution
+            "Win-CAD",      // uppercase: libvirt allows it, paths get confusing
+            "win cad",      // space
+            "win;rm -rf /", // command separator
+            "win$(id)",     // substitution
             "win`id`",
             "win&whoami",
-            "../etc/passwd",       // traversal into the disk path
-            "-rf",                 // reads as a flag to virsh
+            "../etc/passwd", // traversal into the disk path
+            "-rf",           // reads as a flag to virsh
             "win|tee",
             "win\nrm",
         ] {
@@ -872,7 +1206,13 @@ mod tests {
     #[test]
     fn pci_addresses_are_validated() {
         assert!(valid_pci("0000:01:00.0").is_ok());
-        for bad in ["0000:01:00", "01:00.0", "0000:01:00.0 ; id", "zzzz:01:00.0", ""] {
+        for bad in [
+            "0000:01:00",
+            "01:00.0",
+            "0000:01:00.0 ; id",
+            "zzzz:01:00.0",
+            "",
+        ] {
             assert!(valid_pci(bad).is_err(), "should refuse {bad:?}");
         }
     }
@@ -896,6 +1236,7 @@ mod tests {
             console_port: None,
             console_kind: None,
             os: "win2k22".into(),
+            admin_password: None,
         }];
         let req = NewSpace {
             name: "win-sim".into(),
@@ -905,6 +1246,8 @@ mod tests {
             disk_gb: 100,
             iso: None,
             gpu: None,
+            product_key: None,
+            guest_tools_iso: None,
         };
         let e = req.check(&f, &existing).expect_err("should refuse");
         let m = e.to_string();
@@ -927,6 +1270,8 @@ mod tests {
             disk_gb: 60,
             iso: None,
             gpu: None,
+            product_key: None,
+            guest_tools_iso: None,
         };
         let m = req.check(&f, &[]).expect_err("should refuse").to_string();
         assert!(m.contains("32 or fewer"), "{m}");
@@ -951,6 +1296,7 @@ mod tests {
             console_port: None,
             console_kind: None,
             os: "win2k22".into(),
+            admin_password: None,
         }];
         let req = NewSpace {
             name: "win-sim".into(),
@@ -960,8 +1306,13 @@ mod tests {
             disk_gb: 60,
             iso: None,
             gpu: Some("0000:01:00.0".into()),
+            product_key: None,
+            guest_tools_iso: None,
         };
-        let m = req.check(&f, &existing).expect_err("should refuse").to_string();
+        let m = req
+            .check(&f, &existing)
+            .expect_err("should refuse")
+            .to_string();
         assert!(m.contains("win-cad"), "should name the holder: {m}");
     }
 
@@ -979,6 +1330,8 @@ mod tests {
             disk_gb: 60,
             iso: None,
             gpu: Some("0000:01:00.0".into()),
+            product_key: None,
+            guest_tools_iso: None,
         };
         let m = req.check(&f, &[]).expect_err("should refuse").to_string();
         assert!(m.contains("console"), "{m}");
@@ -997,13 +1350,21 @@ mod tests {
             disk_gb: 120,
             iso: Some("/var/lib/leo-spaces/iso/server2022.iso".into()),
             gpu: None,
+            product_key: None,
+            guest_tools_iso: None,
         };
         let c = req.command(&f);
         assert!(c.contains("--boot uefi"), "Windows needs UEFI: {c}");
         assert!(c.contains("backend.version=2.0"), "and a TPM: {c}");
-        assert!(c.contains("virtio-win.iso"), "and the driver ISO, or setup sees no disk: {c}");
+        assert!(
+            c.contains("virtio-win.iso"),
+            "and the driver ISO, or setup sees no disk: {c}"
+        );
         assert!(c.contains("bus=virtio"));
-        assert!(c.contains("listen=127.0.0.1"), "the console must not listen on the LAN: {c}");
+        assert!(
+            c.contains("listen=127.0.0.1"),
+            "the console must not listen on the LAN: {c}"
+        );
         // VNC, not SPICE: guacd cannot bridge SPICE to a browser.
         assert!(c.contains("--graphics vnc"), "{c}");
         assert!(c.contains("--noreboot"), "defining must not boot it: {c}");
@@ -1011,11 +1372,13 @@ mod tests {
         assert!(c.contains("--osinfo win2k22"));
     }
 
-    /// With a GPU passed through, the emulated adapter has to go. Leaving qxl
-    /// in gives Windows two displays and it picks the emulated one — a
-    /// passthrough that worked, looking exactly like one that did not.
+    /// A passed-through card keeps the emulated display beside it and has its
+    /// option ROM off: the firmware console and the installer stay on the
+    /// display the window can show, and the card is the guest's second
+    /// adapter until its driver is in. Dropping the display here used to make
+    /// a working passthrough look like a dead machine — a black console.
     #[test]
-    fn passing_a_gpu_removes_the_emulated_display() {
+    fn passing_a_gpu_keeps_the_console_and_turns_the_rom_off() {
         let f = host_facts();
         let req = NewSpace {
             name: "win-cad".into(),
@@ -1025,11 +1388,47 @@ mod tests {
             disk_gb: 120,
             iso: None,
             gpu: Some("0000:01:00.0".into()),
+            product_key: None,
+            guest_tools_iso: None,
         };
         let c = req.command(&f);
-        assert!(c.contains("--hostdev 0000:01:00.0"));
-        assert!(c.contains("--video none"), "{c}");
-        assert!(!c.contains("--video qxl"), "{c}");
+        assert!(
+            c.contains("--hostdev 0000:01:00.0,address.type=pci,rom.bar=off"),
+            "{c}"
+        );
+        assert!(c.contains("--video qxl"), "{c}");
+        assert!(!c.contains("--video none"), "{c}");
+    }
+
+    /// The guest tools CD rides as its own CD-ROM when it was built, and is
+    /// simply absent when it was not — never a dangling path.
+    #[test]
+    fn the_guest_tools_cd_is_a_third_cdrom_when_built() {
+        let f = host_facts();
+        let mut req = NewSpace {
+            name: "cad".into(),
+            os: "win2k22".into(),
+            vcpus: 8,
+            memory_mb: 16_384,
+            disk_gb: 120,
+            iso: None,
+            gpu: None,
+            product_key: None,
+            guest_tools_iso: None,
+        };
+        assert!(!req.command(&f).contains("guest-tools"));
+        req.guest_tools_iso = Some("/var/lib/leo-spaces/iso/guest-tools-cad.iso".into());
+        let c = req.command(&f);
+        assert!(
+            c.contains("--disk path=/var/lib/leo-spaces/iso/guest-tools-cad.iso,device=cdrom"),
+            "{c}"
+        );
+        // And a request from the wire can never set it: the field is skipped.
+        let parsed: NewSpace = serde_json::from_value(serde_json::json!({
+            "name": "cad", "guest_tools_iso": "/etc/passwd"
+        }))
+        .unwrap();
+        assert!(parsed.guest_tools_iso.is_none());
     }
 
     /// A Linux space gets no TPM and no virtio driver ISO — both are Windows
@@ -1039,12 +1438,14 @@ mod tests {
         let f = host_facts();
         let req = NewSpace {
             name: "build".into(),
-            os: "linux2022".into(),
+            os: "ubuntu24.04".into(),
             vcpus: 4,
             memory_mb: 8192,
             disk_gb: 60,
             iso: None,
             gpu: None,
+            product_key: None,
+            guest_tools_iso: None,
         };
         let c = req.command(&f);
         assert!(!c.contains("--tpm"), "{c}");
@@ -1081,6 +1482,42 @@ mod tests {
     #[test]
     fn delete_removes_the_firmware_variables() {
         // Asserted on the command shape, since the real call needs libvirt.
-        assert!(format!("{VIRSH} undefine x --nvram --remove-all-storage").contains("--nvram"));
+        assert!(undefine_command("x", false).contains("--nvram"));
+        assert!(undefine_command("x", true).contains("--nvram"));
+    }
+
+    /// The installer's "Press any key" is answered on the first boot of a
+    /// Windows install this app staged, and never again: the CD keeps first
+    /// boot order, so a keypress on a later boot re-enters Setup.
+    #[test]
+    fn the_press_any_key_answer_is_a_first_boot_thing() {
+        let probe = first_boot_probe("lab");
+        assert!(probe.contains("guest-tools/lab/autounattend.xml"));
+        assert!(
+            probe.contains("! test -f '/var/lib/leo/spaces-import/guest-tools/lab/.first-boot'")
+        );
+        assert!(probe.contains("touch '/var/lib/leo/spaces-import/guest-tools/lab/.first-boot'"));
+    }
+
+    /// Removing a space deletes the space's own volumes by path, and only
+    /// the ones still attached. The shared installer images ride along as
+    /// CD-ROMs, so `--remove-all-storage` would delete them with it — and
+    /// did, once.
+    #[test]
+    fn delete_never_takes_the_shared_images() {
+        let cmd = undefine_command("lab", false);
+        assert!(!cmd.contains("remove-all-storage"));
+        assert!(cmd.contains(&format!("{STATE_DIR}/disks/lab.qcow2")));
+        assert!(cmd.contains(&format!("{STATE_DIR}/iso/guest-tools-lab.iso")));
+        assert!(cmd.contains("domblklist lab | grep -qF"));
+        assert!(cmd.ends_with("undefine lab --nvram ${s:+--storage $s}"));
+        // One --storage, comma-joined: virsh refuses the flag twice.
+        assert!(cmd.contains("s=\"$s${s:+,}$p\""));
+        assert!(!cmd.contains("--storage $p"));
+        assert!(!cmd.contains("win11") && !cmd.contains("virtio"));
+        assert_eq!(
+            undefine_command("lab", true),
+            format!("{VIRSH} undefine lab --nvram")
+        );
     }
 }

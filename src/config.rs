@@ -35,11 +35,12 @@ use crate::host::Host;
 /// The settings keys this package may read — the same four the descriptor
 /// declares in `entitlements.settings_read`, which is what the hub checks the
 /// Graph reply against. Named here so the request and the merge agree.
-pub const SETTING_KEYS: [&str; 4] = [
+pub const SETTING_KEYS: [&str; 5] = [
     "spaces_host",
     "spaces_ssh_user",
     "spaces_ssh_port",
     "spaces_ssh_key",
+    "spaces_guest_hub",
 ];
 
 /// How long the hub gets to answer before this process gives up and starts on
@@ -58,6 +59,9 @@ pub struct Config {
     pub leo_api_url: String,
     /// guacd, for the browser console. Optional — spaces work without it.
     pub guacd_addr: String,
+    /// What a guest dials to reach the hub, when the host's own view of the
+    /// hub (`guest_tools::hub_host`) is not it. Empty means derive it.
+    pub guest_hub: Option<String>,
     pub listen_port: u16,
 }
 
@@ -151,12 +155,7 @@ impl Config {
             return base;
         };
 
-        match tokio::time::timeout(
-            HUB_TIMEOUT,
-            fetch_settings(&base.leo_api_url, &token),
-        )
-        .await
-        {
+        match tokio::time::timeout(HUB_TIMEOUT, fetch_settings(&base.leo_api_url, &token)).await {
             Ok(Ok(from_hub)) => {
                 settings.fill_from(HostSettings::from_map(&from_hub));
                 Self::with_settings(settings)
@@ -168,7 +167,9 @@ impl Config {
             // where every one of the four is optional and "none of them" is the
             // common case meaning "virtualise on this box".
             Ok(Err(e)) => {
-                tracing::warn!("could not read settings from the hub ({e}) — using the environment");
+                tracing::warn!(
+                    "could not read settings from the hub ({e}) — using the environment"
+                );
                 base
             }
             Err(_) => {
@@ -187,6 +188,7 @@ impl Config {
             leo_api_url: setting("LEO_API_URL")
                 .unwrap_or_else(|| "http://127.0.0.1:8420".to_string()),
             guacd_addr: setting("guacd_addr").unwrap_or_else(|| "127.0.0.1:4822".to_string()),
+            guest_hub: setting("spaces_guest_hub"),
             listen_port: std::env::var("LEO_APP_PORT")
                 .or_else(|_| std::env::var("PORT"))
                 .ok()
@@ -263,6 +265,52 @@ struct SettingsReply {
 /// like malformed JSON rather than like a framing bug.
 async fn fetch_settings(api_url: &str, token: &str) -> anyhow::Result<BTreeMap<String, String>> {
     use anyhow::Context as _;
+    let body = hub_request(api_url, "GET", "/graph/v1/settings", Some(token), None).await?;
+    let reply: SettingsReply = serde_json::from_slice(&body)
+        .context("the hub's settings reply was not the JSON this expects")?;
+
+    // Echoed by the hub, so a token belonging to another package is found out
+    // here rather than as three configuration mysteries later.
+    if !reply.package.is_empty() && reply.package != PACKAGE {
+        anyhow::bail!(
+            "this token belongs to package '{}', not '{PACKAGE}'",
+            reply.package
+        );
+    }
+    tracing::info!(
+        "read {} setting(s) from the hub{}",
+        reply.settings.len(),
+        if reply.missing.is_empty() {
+            String::new()
+        } else {
+            format!(" (not set: {})", reply.missing.join(", "))
+        }
+    );
+    Ok(reply.settings)
+}
+
+/// `GET` the hub's API, unauthenticated, answering the body as text.
+pub(crate) async fn hub_get(api_url: &str, path: &str) -> anyhow::Result<String> {
+    let body = hub_request(api_url, "GET", path, None, None).await?;
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+/// `POST` JSON to the hub's API, unauthenticated, answering the body as text.
+pub(crate) async fn hub_post(api_url: &str, path: &str, json: &str) -> anyhow::Result<String> {
+    let body = hub_request(api_url, "POST", path, None, Some(json)).await?;
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+/// One request to the hub over loopback, by hand. The one HTTP client this
+/// process has — see the module note on why there is no client crate.
+async fn hub_request(
+    api_url: &str,
+    method: &str,
+    path: &str,
+    bearer: Option<&str>,
+    json: Option<&str>,
+) -> anyhow::Result<Vec<u8>> {
+    use anyhow::Context as _;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     /// Enough for every entitled setting several times over, and a bound on
@@ -272,34 +320,45 @@ async fn fetch_settings(api_url: &str, token: &str) -> anyhow::Result<BTreeMap<S
     // Everything that goes into a request line or a header is checked first.
     // Both of these arrive from outside this process — `LEO_API_URL` from the
     // environment, the token from a file — and a `\r\n` in either would end
-    // the line early and let the rest be read as a header of its own. The
-    // values are a loopback authority and an opaque credential; neither has
-    // any business containing a control character, so this costs nothing and
-    // removes the question.
+    // the line early and let the rest be read as a header of its own.
     let authority = api_url
         .trim_end_matches('/')
         .strip_prefix("http://")
-        .with_context(|| format!("LEO_API_URL must be a plain http:// loopback URL, got {api_url}"))?
-        // `http://127.0.0.1:8420/api` is a reasonable thing to be handed, and
-        // `TcpStream::connect` cannot parse a path. Take the authority.
+        .with_context(|| {
+            format!("LEO_API_URL must be a plain http:// loopback URL, got {api_url}")
+        })?
         .split(['/', '?', '#'])
         .next()
         .unwrap_or_default();
     header_safe(authority, "LEO_API_URL")?;
-    header_safe(token, "the package token")?;
+    header_safe(path, "the request path")?;
+    if let Some(t) = bearer {
+        header_safe(t, "the package token")?;
+    }
 
     let mut stream = tokio::net::TcpStream::connect(authority)
         .await
         .with_context(|| format!("connecting to the hub at {authority}"))?;
 
+    let auth = bearer
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    let body = json.unwrap_or("");
+    let content = if json.is_some() {
+        format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n",
+            body.len()
+        )
+    } else {
+        String::new()
+    };
     stream
         .write_all(
             format!(
-                "GET /graph/v1/settings HTTP/1.1\r\n\
+                "{method} {path} HTTP/1.1\r\n\
                  Host: {authority}\r\n\
-                 Authorization: Bearer {token}\r\n\
-                 Accept: application/json\r\n\
-                 Connection: close\r\n\r\n"
+                 {auth}{content}Accept: application/json\r\n\
+                 Connection: close\r\n\r\n{body}"
             )
             .as_bytes(),
         )
@@ -335,28 +394,7 @@ async fn fetch_settings(api_url: &str, token: &str) -> anyhow::Result<BTreeMap<S
             String::from_utf8_lossy(&body).trim()
         );
     }
-
-    let reply: SettingsReply = serde_json::from_slice(&body)
-        .context("the hub's settings reply was not the JSON this expects")?;
-
-    // Echoed by the hub, so a token belonging to another package is found out
-    // here rather than as three configuration mysteries later.
-    if !reply.package.is_empty() && reply.package != PACKAGE {
-        anyhow::bail!(
-            "this token belongs to package '{}', not '{PACKAGE}'",
-            reply.package
-        );
-    }
-    tracing::info!(
-        "read {} setting(s) from the hub{}",
-        reply.settings.len(),
-        if reply.missing.is_empty() {
-            String::new()
-        } else {
-            format!(" (not set: {})", reply.missing.join(", "))
-        }
-    );
-    Ok(reply.settings)
+    Ok(body)
 }
 
 /// This package's name, as the hub knows it — the `name` in `descriptor.json`,

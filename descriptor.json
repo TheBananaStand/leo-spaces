@@ -3,7 +3,7 @@
   "label": "Spaces",
   "description": "Run whole machines on a Leo hub — install the hypervisor, create Windows and Linux guests, and hand one a GPU.",
   "details": "Turns a Leo hub or compute machine into a hypervisor, then runs guests on it. The Host setup tab reports what the box is — distribution, CPU, IOMMU, graphics devices, whether anything can be isolated for a guest — and derives the remaining steps fresh on every load, so a step that became true disappears. Guests are KVM/QEMU domains managed through libvirt: define one, start it, snapshot it, assign it a GPU exclusively. Windows guests get UEFI firmware, a software TPM and the virtio driver ISO without being asked, because all three are what a Windows install needs and the failures when they are missing look like broken storage. Everything privileged goes through one root-owned wrapper with a closed verb set; without it this package still reports and plans, and hands over the exact commands.",
-  "setup_hint": "Install it on the box you want to virtualise on and leave the host field blank. Then two commands as an admin on that box: `leo mcp add spaces /var/lib/leo/apps/spaces/src/target/release/leo-spaces mcp` (an app package never gets its own MCP server, so the tools need this) and `sudo bash scripts/install-admin-wrapper.sh` (the privileged half, without which this reports and plans but does not apply). To drive a remote host instead, mint it a token for its own settings first (leo packages token mint spaces --scope settings:read) and pass it as --token.",
+  "setup_hint": "Install it on the box you want to virtualise on and leave the host field blank — `leo packages install descriptor.json --on <box> --enabled` does the whole thing, including placing this package's root-owned wrapper and the one sudoers rule for its ten verbs (that is the privileged_helper block below, and the install asks before it does it). Then one command as an admin on that box: `leo mcp add spaces /var/lib/leo/apps/spaces/src/target/release/leo-spaces mcp` — an app package never gets its own MCP server, so the tools need this. To drive a remote host instead, mint it a token for its own settings first (leo packages token mint spaces --scope settings:read) and pass it as --token.",
   "use_cases": [
     "Turn the work hub into a hypervisor without a console",
     "Run Windows-only CAD and simulation software on Linux metal",
@@ -53,6 +53,13 @@
       "field_type": "text",
       "required": false,
       "options": null
+    },
+    {
+      "key": "spaces_guest_hub",
+      "label": "Hub address guests pair with (blank: derived from the host)",
+      "field_type": "text",
+      "required": false,
+      "options": null
     }
   ],
   "pages": [
@@ -75,7 +82,8 @@
       "spaces_host",
       "spaces_ssh_user",
       "spaces_ssh_port",
-      "spaces_ssh_key"
+      "spaces_ssh_key",
+      "spaces_guest_hub"
     ],
     "network": [
       "fedorapeople.org"
@@ -91,7 +99,8 @@
     "spaces": {
       "addressableState": [
         "tab",
-        "selectedId"
+        "selectedId",
+        "console.name"
       ],
       "assistant": {
         "app": "Spaces",
@@ -99,373 +108,432 @@
         "suggestions": [
           "Is the hypervisor set up on this host?",
           "What's running right now?",
-          "Start the Windows CAD machine",
+          "Make an Ubuntu space with 4 cores and 8 GB",
           "Can the GPU be passed through?"
         ]
       },
       "body": {
-        "detail": {
-          "align": "leading",
-          "children": [
-            {
-              "bind": "kind_label",
-              "kind": "badge",
-              "tintFrom": "badge_color"
-            },
-            {
-              "bind": "title",
-              "kind": "text",
-              "style": "title",
-              "wrap": true
-            },
-            {
-              "bind": "detail_text",
-              "hideWhenEmpty": true,
-              "kind": "text",
-              "style": "subtle",
-              "wrap": true
-            },
-            {
-              "kind": "divider"
-            },
-            {
-              "bind": "sections",
-              "item": {
+        "children": [
+          {
+            "align": "leading",
+            "children": [
+              {
                 "align": "leading",
                 "children": [
                   {
-                    "bind": "title",
                     "kind": "text",
-                    "style": "section-label"
+                    "style": "section-label",
+                    "value": "HYPERVISOR"
                   },
                   {
-                    "bind": "fields",
-                    "item": {
-                      "align": "center",
-                      "children": [
-                        {
-                          "bind": "label",
-                          "kind": "text",
-                          "style": "caption"
-                        },
-                        {
-                          "kind": "spacer"
-                        },
-                        {
-                          "bind": "value",
-                          "kind": "text",
-                          "lines": 1,
-                          "style": "mono"
-                        }
-                      ],
-                      "kind": "hstack",
-                      "spacing": 8
-                    },
-                    "kind": "list",
+                    "align": "center",
+                    "children": [
+                      {
+                        "colorFrom": "host_status_color",
+                        "kind": "dot",
+                        "size": 8
+                      },
+                      {
+                        "bind": "host_status_label",
+                        "kind": "text",
+                        "style": "headline"
+                      }
+                    ],
+                    "kind": "hstack",
                     "spacing": 8
+                  },
+                  {
+                    "bind": "host_label",
+                    "color": "secondary",
+                    "hideWhenEmpty": true,
+                    "kind": "text",
+                    "lines": 1,
+                    "style": "mono"
                   }
                 ],
                 "kind": "vstack",
-                "spacing": 8
+                "paddingH": 10,
+                "paddingV": 6,
+                "spacing": 5
               },
-              "kind": "list",
-              "spacing": 14
-            },
-            {
-              "align": "leading",
-              "children": [
-                {
-                  "kind": "text",
-                  "style": "section-label",
-                  "value": "IN THE WAY"
-                },
-                {
-                  "bind": "blocked",
-                  "color": "muted",
-                  "kind": "text",
-                  "style": "caption",
-                  "wrap": true
-                }
-              ],
-              "hideWhenEmpty": true,
-              "kind": "vstack",
-              "paddingTop": 4,
-              "spacing": 6,
-              "visibleWhen": {
-                "equals": "1",
-                "field": "has_blocker"
-              }
-            },
-            {
-              "align": "leading",
-              "children": [
-                {
-                  "kind": "text",
-                  "style": "section-label",
-                  "value": "COMMAND"
-                },
-                {
-                  "bind": "command",
-                  "color": "secondary",
-                  "kind": "text",
-                  "style": "mono",
-                  "wrap": true
-                },
-                {
-                  "children": [
-                    {
-                      "action": {
-                        "kind": "copyText",
-                        "text": "{command}"
-                      },
-                      "kind": "button",
-                      "label": "Copy",
-                      "variant": "pill"
-                    }
-                  ],
-                  "kind": "hstack"
-                }
-              ],
-              "kind": "vstack",
-              "paddingTop": 4,
-              "spacing": 6,
-              "visibleWhen": {
-                "equals": "1",
-                "field": "has_command"
-              }
-            },
-            {
-              "align": "leading",
-              "children": [
-                {
-                  "kind": "text",
-                  "style": "section-label",
-                  "value": "CONTROLS"
-                },
-                {
-                  "children": [
-                    {
-                      "action": {
-                        "body": {
-                          "action": "start"
-                        },
-                        "method": "POST",
-                        "path": "/p/spaces/api/spaces/{title}/control",
-                        "refresh": "reload"
-                      },
-                      "kind": "button",
-                      "label": "Start",
-                      "variant": "pill",
-                      "visibleWhen": {
-                        "equals": "off",
-                        "field": "running"
-                      }
-                    },
-                    {
-                      "action": {
-                        "body": {
-                          "action": "shutdown"
-                        },
-                        "method": "POST",
-                        "path": "/p/spaces/api/spaces/{title}/control",
-                        "refresh": "reload"
-                      },
-                      "kind": "button",
-                      "label": "Shut down",
-                      "variant": "pill",
-                      "visibleWhen": {
-                        "equals": "on",
-                        "field": "running"
-                      }
-                    },
-                    {
-                      "action": {
-                        "body": {
-                          "action": "reboot"
-                        },
-                        "method": "POST",
-                        "path": "/p/spaces/api/spaces/{title}/control",
-                        "refresh": "reload"
-                      },
-                      "kind": "button",
-                      "label": "Restart",
-                      "variant": "pill",
-                      "visibleWhen": {
-                        "equals": "on",
-                        "field": "running"
-                      }
-                    }
-                  ],
-                  "kind": "hstack",
-                  "spacing": 8
-                },
-                {
-                  "children": [
-                    {
-                      "action": {
-                        "confirm": {
-                          "body": {
-                            "action": "force_off"
-                          },
-                          "method": "POST",
-                          "path": "/p/spaces/api/spaces/{title}/control",
-                          "refresh": "reload"
-                        },
-                        "confirmLabel": "Force off",
-                        "destructive": true,
-                        "kind": "confirm",
-                        "message": "Cuts the power without telling the guest. Unsaved work is lost, and a guest writing to disk can be left with a damaged filesystem. Use Shut down unless it has stopped responding.",
-                        "title": "Force “{title}” off?"
-                      },
-                      "kind": "button",
-                      "label": "Force off",
-                      "variant": "destructive",
-                      "visibleWhen": {
-                        "equals": "on",
-                        "field": "running"
-                      }
-                    }
-                  ],
-                  "kind": "hstack",
-                  "paddingTop": 2,
-                  "spacing": 8
-                }
-              ],
-              "kind": "vstack",
-              "paddingTop": 8,
-              "spacing": 8,
-              "visibleWhen": {
-                "equals": "space",
-                "field": "kind"
-              }
-            },
-            {
-              "align": "leading",
-              "children": [
-                {
-                  "children": [
-                    {
-                      "action": {
-                        "body": {
-                          "step": "{id}"
-                        },
-                        "method": "POST",
-                        "path": "/p/spaces/api/host/apply",
-                        "refresh": "reload"
-                      },
-                      "kind": "button",
-                      "label": "Apply",
-                      "variant": "pill",
-                      "visibleWhen": {
-                        "equals": "direct",
-                        "field": "apply_mode"
-                      }
-                    }
-                  ],
-                  "kind": "hstack",
-                  "spacing": 8
-                },
-                {
-                  "children": [
-                    {
-                      "action": {
-                        "confirm": {
-                          "body": {
-                            "step": "{id}"
-                          },
-                          "method": "POST",
-                          "path": "/p/spaces/api/host/apply",
-                          "refresh": "reload"
-                        },
-                        "confirmLabel": "Write it",
-                        "destructive": true,
-                        "kind": "confirm",
-                        "message": "This edits the kernel command line. A backup of the boot configuration is written first, and any fallback entry is left untouched so there is a way back. The change takes effect on the next reboot — nothing restarts now.",
-                        "title": "Change how this host boots?"
-                      },
-                      "kind": "button",
-                      "label": "Apply and reboot later",
-                      "variant": "destructive",
-                      "visibleWhen": {
-                        "equals": "boot",
-                        "field": "apply_mode"
-                      }
-                    }
-                  ],
-                  "kind": "hstack",
-                  "spacing": 8
-                }
-              ],
-              "kind": "vstack",
-              "paddingTop": 8,
-              "spacing": 8,
-              "visibleWhen": {
-                "equals": "step",
-                "field": "kind"
-              }
-            }
-          ],
-          "kind": "vstack",
-          "spacing": 12
-        },
-        "detailWidth": 360,
-        "dividerInset": 22,
-        "dividers": true,
-        "kind": "masterDetail",
-        "list": {
-          "bind": "rows",
-          "empty": {
-            "children": [
               {
+                "children": [
+                  {
+                    "kind": "text",
+                    "style": "section-label",
+                    "value": "MACHINES"
+                  }
+                ],
+                "kind": "hstack",
+                "paddingH": 10,
+                "paddingTop": 14
+              },
+              {
+                "kind": "searchField",
+                "placeholder": "Search",
+                "stateKey": "query",
+                "width": 196
+              },
+              {
+                "countBind": "space_count",
                 "icon": "macwindow",
-                "kind": "emptyState",
-                "message": "Once the host is set up, ask Leo to create one — “make a Windows Server space with 8 cores and 16 GB”.",
-                "title": "No spaces yet",
-                "visibleWhen": {
-                  "equals": "spaces",
-                  "state": "tab"
-                }
+                "kind": "selectRow",
+                "label": "Spaces",
+                "stateKey": "tab",
+                "value": "spaces"
               },
               {
-                "icon": "checkmark.seal",
-                "kind": "emptyState",
-                "message": "Everything a guest needs is installed and running.",
-                "title": "Host is ready",
-                "visibleWhen": {
-                  "equals": "setup",
-                  "state": "tab"
-                }
+                "countBind": "setup_count",
+                "icon": "gearshape",
+                "kind": "selectRow",
+                "label": "Settings",
+                "stateKey": "tab",
+                "value": "settings"
               },
               {
-                "icon": "cpu",
-                "kind": "emptyState",
-                "message": "Nothing on the PCI bus reports itself as a display adapter.",
-                "title": "No graphics devices found",
-                "visibleWhen": {
-                  "equals": "hardware",
-                  "state": "tab"
-                }
+                "a11yLabel": "Make a new space",
+                "action": [
+                  {
+                    "key": "form.name",
+                    "kind": "setState",
+                    "value": ""
+                  },
+                  {
+                    "key": "creating",
+                    "kind": "setState",
+                    "value": true
+                  }
+                ],
+                "icon": "plus",
+                "kind": "button",
+                "label": "New space",
+                "variant": "rail"
+              },
+              {
+                "kind": "spacer"
               }
             ],
-            "kind": "vstack"
+            "kind": "vstack",
+            "paddingV": 8,
+            "spacing": 2,
+            "width": 216
           },
-          "filter": {
-            "equalsState": "tab",
-            "field": "tab",
-            "search": "query",
-            "searchFields": [
-              "title",
-              "subtitle",
-              "trailing"
-            ]
+          {
+            "kind": "divider"
           },
-          "item": {
-            "align": "center",
+          {
             "children": [
               {
-                "colorFrom": "state_color",
-                "kind": "dot",
-                "size": 7
+                "align": "leading",
+                "children": [
+                  {
+                    "align": "center",
+                    "children": [
+                      {
+                        "kind": "text",
+                        "style": "title",
+                        "value": "Spaces"
+                      },
+                      {
+                        "bind": "space_count",
+                        "color": "muted",
+                        "kind": "text",
+                        "style": "title"
+                      },
+                      {
+                        "kind": "spacer"
+                      }
+                    ],
+                    "kind": "hstack",
+                    "paddingH": 22,
+                    "paddingTop": 16,
+                    "paddingV": 10,
+                    "spacing": 10
+                  },
+                  {
+                    "bind": "rows",
+                    "empty": {
+                      "icon": "macwindow",
+                      "kind": "emptyState",
+                      "message": "New space, in the rail, makes one: pick the operating system, the size and a GPU. Or ask Leo “make a Windows Server space with 8 cores and 16 GB”.",
+                      "title": "No spaces yet"
+                    },
+                    "filter": {
+                      "equalsState": "tab",
+                      "field": "tab",
+                      "search": "query",
+                      "searchFields": [
+                        "title",
+                        "subtitle",
+                        "trailing"
+                      ]
+                    },
+                    "item": {
+                      "card": true,
+                      "children": [
+                        {
+                          "children": [
+                            {
+                              "corner": 10,
+                              "fill": "{art_color}",
+                              "kind": "tile",
+                              "label": ""
+                            },
+                            {
+                              "align": "leading",
+                              "children": [
+                                {
+                                  "align": "center",
+                                  "children": [
+                                    {
+                                      "bind": "os_chip",
+                                      "hideWhenEmpty": true,
+                                      "kind": "badge",
+                                      "tint": "surface"
+                                    },
+                                    {
+                                      "kind": "spacer"
+                                    },
+                                    {
+                                      "colorFrom": "state_color",
+                                      "kind": "dot",
+                                      "size": 8
+                                    },
+                                    {
+                                      "bind": "badge",
+                                      "colorFrom": "state_color",
+                                      "kind": "text",
+                                      "lines": 1,
+                                      "style": "caption"
+                                    }
+                                  ],
+                                  "kind": "hstack",
+                                  "spacing": 8
+                                },
+                                {
+                                  "kind": "spacer"
+                                },
+                                {
+                                  "children": [
+                                    {
+                                      "kind": "spacer"
+                                    },
+                                    {
+                                      "bind": "os_symbol",
+                                      "color": "whiteMuted",
+                                      "kind": "icon",
+                                      "size": 40
+                                    },
+                                    {
+                                      "kind": "spacer"
+                                    }
+                                  ],
+                                  "kind": "hstack"
+                                },
+                                {
+                                  "kind": "spacer"
+                                },
+                                {
+                                  "bind": "title",
+                                  "color": "white",
+                                  "kind": "text",
+                                  "lines": 1,
+                                  "style": "headline"
+                                },
+                                {
+                                  "bind": "subtitle",
+                                  "color": "whiteMuted",
+                                  "hideWhenEmpty": true,
+                                  "kind": "text",
+                                  "lines": 1,
+                                  "style": "caption"
+                                }
+                              ],
+                              "fill": true,
+                              "kind": "vstack",
+                              "padding": 14,
+                              "spacing": 0
+                            }
+                          ],
+                          "kind": "zstack"
+                        },
+                        {
+                          "align": "leading",
+                          "children": [
+                            {
+                              "align": "center",
+                              "children": [
+                                {
+                                  "bind": "trailing",
+                                  "color": "secondary",
+                                  "hideWhenEmpty": true,
+                                  "kind": "text",
+                                  "lines": 1,
+                                  "style": "mono"
+                                },
+                                {
+                                  "kind": "spacer"
+                                },
+                                {
+                                  "bind": "gpu_chip",
+                                  "color": "muted",
+                                  "hideWhenEmpty": true,
+                                  "kind": "text",
+                                  "lines": 1,
+                                  "style": "caption"
+                                }
+                              ],
+                              "kind": "hstack",
+                              "spacing": 8
+                            },
+                            {
+                              "bind": "admin_line",
+                              "color": "muted",
+                              "hideWhenEmpty": true,
+                              "kind": "text",
+                              "lines": 1,
+                              "style": "mono"
+                            }
+                          ],
+                          "kind": "vstack",
+                          "paddingH": 14,
+                          "paddingV": 11,
+                          "spacing": 3
+                        }
+                      ],
+                      "kind": "vstack",
+                      "padding": 0,
+                      "spacing": 0,
+                      "tap": {
+                        "key": "console.name",
+                        "kind": "setState",
+                        "value": "{title}"
+                      }
+                    },
+                    "kind": "grid",
+                    "minWidth": 320,
+                    "paddingH": 22,
+                    "paddingV": 4,
+                    "scrollV": true,
+                    "spacing": 16,
+                    "swipeActions": {
+                      "trailing": [
+                        {
+                          "action": {
+                            "kind": "openWindow",
+                            "label": "{title}",
+                            "route": "/p/spaces/console/{title}"
+                          },
+                          "icon": "display",
+                          "label": "Open screen",
+                          "visibleWhen": {
+                            "equals": "1",
+                            "field": "has_console"
+                          }
+                        },
+                        {
+                          "action": {
+                            "body": {
+                              "action": "start"
+                            },
+                            "method": "POST",
+                            "path": "/p/spaces/api/spaces/{title}/control",
+                            "refresh": "reload"
+                          },
+                          "icon": "play",
+                          "label": "Start",
+                          "visibleWhen": {
+                            "equals": "off",
+                            "field": "running"
+                          }
+                        },
+                        {
+                          "action": {
+                            "body": {
+                              "action": "shutdown"
+                            },
+                            "method": "POST",
+                            "path": "/p/spaces/api/spaces/{title}/control",
+                            "refresh": "reload"
+                          },
+                          "icon": "power",
+                          "label": "Shut down",
+                          "visibleWhen": {
+                            "equals": "on",
+                            "field": "running"
+                          }
+                        },
+                        {
+                          "action": {
+                            "body": {
+                              "action": "reboot"
+                            },
+                            "method": "POST",
+                            "path": "/p/spaces/api/spaces/{title}/control",
+                            "refresh": "reload"
+                          },
+                          "icon": "arrow.clockwise",
+                          "label": "Restart",
+                          "visibleWhen": {
+                            "equals": "on",
+                            "field": "running"
+                          }
+                        },
+                        {
+                          "action": {
+                            "confirm": {
+                              "body": {
+                                "action": "force_off"
+                              },
+                              "method": "POST",
+                              "path": "/p/spaces/api/spaces/{title}/control",
+                              "refresh": "reload"
+                            },
+                            "confirmLabel": "Force off",
+                            "destructive": true,
+                            "kind": "confirm",
+                            "message": "Cuts the power without telling the guest. Unsaved work is lost, and a guest writing to disk can be left with a damaged filesystem. Use Shut down unless it has stopped responding.",
+                            "title": "Force “{title}” off?"
+                          },
+                          "icon": "bolt.slash",
+                          "label": "Force off",
+                          "tint": "error",
+                          "visibleWhen": {
+                            "equals": "on",
+                            "field": "running"
+                          }
+                        },
+                        {
+                          "action": {
+                            "confirm": {
+                              "method": "DELETE",
+                              "path": "/p/spaces/api/spaces/{title}",
+                              "refresh": "reload"
+                            },
+                            "confirmLabel": "Delete",
+                            "destructive": true,
+                            "kind": "confirm",
+                            "message": "Removes the machine's definition. Its disk is kept under /var/lib/leo-spaces/disks, so what was installed on it is not lost.",
+                            "title": "Delete “{title}”?"
+                          },
+                          "icon": "trash",
+                          "label": "Delete",
+                          "tint": "error",
+                          "visibleWhen": {
+                            "equals": "off",
+                            "field": "running"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "kind": "vstack",
+                "spacing": 0,
+                "visibleWhen": {
+                  "equals": "",
+                  "state": "console.name"
+                }
               },
               {
                 "align": "leading",
@@ -474,222 +542,772 @@
                     "align": "center",
                     "children": [
                       {
-                        "bind": "title",
-                        "kind": "text",
-                        "lines": 1,
-                        "style": "headline"
+                        "a11yLabel": "Back to the board",
+                        "action": {
+                          "key": "console.name",
+                          "kind": "setState",
+                          "value": ""
+                        },
+                        "icon": "chevron.left",
+                        "kind": "button",
+                        "label": "Spaces",
+                        "variant": "pill"
                       },
                       {
-                        "bind": "badge",
-                        "hideWhenEmpty": true,
-                        "kind": "badge",
-                        "tintFrom": "badge_color"
+                        "kind": "spacer"
+                      },
+                      {
+                        "a11yLabel": "Open this screen in its own window",
+                        "action": {
+                          "kind": "openWindow",
+                          "label": "{console.name}",
+                          "route": "/p/spaces/console/{console.name}"
+                        },
+                        "icon": "macwindow.on.rectangle",
+                        "kind": "button",
+                        "label": "Open in window",
+                        "variant": "pill"
                       }
                     ],
                     "kind": "hstack",
-                    "spacing": 7
+                    "paddingH": 22,
+                    "paddingTop": 14,
+                    "paddingV": 10,
+                    "spacing": 10
                   },
                   {
-                    "bind": "subtitle",
-                    "hideWhenEmpty": true,
-                    "kind": "text",
-                    "lines": 1,
-                    "style": "caption"
+                    "fallback": {
+                      "icon": "display",
+                      "kind": "emptyState",
+                      "message": "This client can’t draw a remote screen in place. Open in window shows it in its own panel.",
+                      "title": "No screen here"
+                    },
+                    "kind": "native",
+                    "props": {
+                      "route": "/p/spaces/console/{console.name}"
+                    },
+                    "ref": "webPane"
+                  }
+                ],
+                "fill": true,
+                "kind": "vstack",
+                "spacing": 0,
+                "visibleWhen": {
+                  "nonEmpty": true,
+                  "state": "console.name"
+                }
+              }
+            ],
+            "kind": "panel",
+            "padding": 0,
+            "scroll": false,
+            "visibleWhen": {
+              "equals": "spaces",
+              "state": "tab"
+            }
+          },
+          {
+            "children": [
+              {
+                "children": [
+                  {
+                    "bind": "setup_rows",
+                    "item": {
+                      "align": "center",
+                      "children": [
+                        {
+                          "colorFrom": "state_color",
+                          "kind": "dot",
+                          "size": 7
+                        },
+                        {
+                          "align": "leading",
+                          "children": [
+                            {
+                              "align": "center",
+                              "children": [
+                                {
+                                  "bind": "title",
+                                  "kind": "text",
+                                  "lines": 1,
+                                  "style": "headline"
+                                },
+                                {
+                                  "bind": "badge",
+                                  "hideWhenEmpty": true,
+                                  "kind": "badge",
+                                  "tintFrom": "badge_color"
+                                }
+                              ],
+                              "kind": "hstack",
+                              "spacing": 7
+                            },
+                            {
+                              "bind": "subtitle",
+                              "color": "secondary",
+                              "hideWhenEmpty": true,
+                              "kind": "text",
+                              "lines": 2,
+                              "style": "caption",
+                              "wrap": true
+                            }
+                          ],
+                          "kind": "vstack",
+                          "spacing": 2
+                        },
+                        {
+                          "kind": "spacer"
+                        },
+                        {
+                          "bind": "trailing",
+                          "color": "secondary",
+                          "hideWhenEmpty": true,
+                          "kind": "text",
+                          "style": "mono"
+                        },
+                        {
+                          "a11yLabel": "Copy the command this step would run",
+                          "action": {
+                            "kind": "copyText",
+                            "text": "{command}"
+                          },
+                          "icon": "doc.on.doc",
+                          "kind": "button",
+                          "label": "Copy command",
+                          "variant": "icon",
+                          "visibleWhen": {
+                            "equals": "1",
+                            "field": "copy_only"
+                          }
+                        },
+                        {
+                          "action": {
+                            "body": {
+                              "step": "{id}"
+                            },
+                            "method": "POST",
+                            "path": "/p/spaces/api/host/apply",
+                            "refresh": "reload"
+                          },
+                          "kind": "button",
+                          "label": "Apply",
+                          "variant": "pill",
+                          "visibleWhen": {
+                            "equals": "direct",
+                            "field": "apply_mode"
+                          }
+                        },
+                        {
+                          "action": {
+                            "confirm": {
+                              "body": {
+                                "step": "{id}"
+                              },
+                              "method": "POST",
+                              "path": "/p/spaces/api/host/apply",
+                              "refresh": "reload"
+                            },
+                            "confirmLabel": "Write it",
+                            "destructive": true,
+                            "kind": "confirm",
+                            "message": "This edits what the host loads at boot. A backup of the boot configuration is written first, and any fallback entry is left untouched so there is a way back. The change takes effect on the next reboot — nothing restarts now.",
+                            "title": "Change how this host boots?"
+                          },
+                          "kind": "button",
+                          "label": "Apply",
+                          "variant": "pill",
+                          "visibleWhen": {
+                            "equals": "boot",
+                            "field": "apply_mode"
+                          }
+                        }
+                      ],
+                      "kind": "hstack",
+                      "paddingV": 7,
+                      "spacing": 10
+                    },
+                    "kind": "list",
+                    "spacing": 0
+                  }
+                ],
+                "kind": "panel",
+                "label": "Host setup",
+                "spacing": 4
+              },
+              {
+                "children": [
+                  {
+                    "children": [
+                      {
+                        "bind": "host_facts",
+                        "item": {
+                          "align": "center",
+                          "children": [
+                            {
+                              "bind": "label",
+                              "kind": "text",
+                              "style": "caption"
+                            },
+                            {
+                              "kind": "spacer"
+                            },
+                            {
+                              "bind": "value",
+                              "kind": "text",
+                              "lines": 1,
+                              "style": "mono"
+                            }
+                          ],
+                          "kind": "hstack",
+                          "spacing": 8
+                        },
+                        "kind": "list",
+                        "spacing": 6
+                      },
+                      {
+                        "bind": "unreachable_reason",
+                        "color": "muted",
+                        "hideWhenEmpty": true,
+                        "kind": "text",
+                        "style": "caption",
+                        "wrap": true
+                      }
+                    ],
+                    "fillHeight": false,
+                    "kind": "panel",
+                    "label": "Host",
+                    "scroll": false,
+                    "spacing": 4
+                  },
+                  {
+                    "children": [
+                      {
+                        "bind": "gpu_rows",
+                        "item": {
+                          "align": "center",
+                          "children": [
+                            {
+                              "colorFrom": "state_color",
+                              "kind": "dot",
+                              "size": 7
+                            },
+                            {
+                              "align": "leading",
+                              "children": [
+                                {
+                                  "align": "center",
+                                  "children": [
+                                    {
+                                      "bind": "title",
+                                      "kind": "text",
+                                      "lines": 1,
+                                      "style": "headline"
+                                    },
+                                    {
+                                      "bind": "badge",
+                                      "hideWhenEmpty": true,
+                                      "kind": "badge",
+                                      "tintFrom": "badge_color"
+                                    }
+                                  ],
+                                  "kind": "hstack",
+                                  "spacing": 7
+                                },
+                                {
+                                  "bind": "subtitle",
+                                  "color": "secondary",
+                                  "hideWhenEmpty": true,
+                                  "kind": "text",
+                                  "lines": 2,
+                                  "style": "caption",
+                                  "wrap": true
+                                }
+                              ],
+                              "kind": "vstack",
+                              "spacing": 2
+                            },
+                            {
+                              "kind": "spacer"
+                            },
+                            {
+                              "bind": "trailing",
+                              "color": "secondary",
+                              "hideWhenEmpty": true,
+                              "kind": "text",
+                              "style": "mono"
+                            }
+                          ],
+                          "kind": "hstack",
+                          "paddingV": 7,
+                          "spacing": 10
+                        },
+                        "kind": "list",
+                        "spacing": 0
+                      },
+                      {
+                        "icon": "cpu",
+                        "kind": "emptyState",
+                        "message": "Nothing on the PCI bus reports itself as a display adapter.",
+                        "title": "No graphics devices",
+                        "visibleWhen": {
+                          "equals": "0",
+                          "field": "has_gpus"
+                        }
+                      }
+                    ],
+                    "kind": "panel",
+                    "label": "Graphics",
+                    "spacing": 4
                   }
                 ],
                 "kind": "vstack",
-                "spacing": 3
+                "spacing": 12
               },
               {
-                "kind": "spacer"
-              },
-              {
-                "bind": "trailing",
-                "color": "secondary",
-                "hideWhenEmpty": true,
-                "kind": "text",
-                "style": "mono"
+                "children": [
+                  {
+                    "bind": "installer_hint",
+                    "color": "muted",
+                    "kind": "text",
+                    "style": "caption",
+                    "wrap": true
+                  },
+                  {
+                    "bind": "installer_rows",
+                    "item": {
+                      "align": "center",
+                      "children": [
+                        {
+                          "colorFrom": "state_color",
+                          "kind": "dot",
+                          "size": 7
+                        },
+                        {
+                          "align": "leading",
+                          "children": [
+                            {
+                              "align": "center",
+                              "children": [
+                                {
+                                  "bind": "title",
+                                  "kind": "text",
+                                  "lines": 1,
+                                  "style": "headline"
+                                },
+                                {
+                                  "bind": "badge",
+                                  "hideWhenEmpty": true,
+                                  "kind": "badge",
+                                  "tintFrom": "badge_color"
+                                }
+                              ],
+                              "kind": "hstack",
+                              "spacing": 7
+                            },
+                            {
+                              "bind": "subtitle",
+                              "color": "secondary",
+                              "hideWhenEmpty": true,
+                              "kind": "text",
+                              "lines": 2,
+                              "style": "caption",
+                              "wrap": true
+                            }
+                          ],
+                          "kind": "vstack",
+                          "spacing": 2
+                        },
+                        {
+                          "kind": "spacer"
+                        },
+                        {
+                          "bind": "trailing",
+                          "color": "secondary",
+                          "hideWhenEmpty": true,
+                          "kind": "text",
+                          "style": "mono"
+                        },
+                        {
+                          "a11yLabel": "Copy where the image goes",
+                          "action": {
+                            "kind": "copyText",
+                            "text": "{path}"
+                          },
+                          "icon": "doc.on.doc",
+                          "kind": "button",
+                          "label": "Copy path",
+                          "variant": "icon",
+                          "visibleWhen": {
+                            "equals": "1",
+                            "field": "bring"
+                          }
+                        },
+                        {
+                          "action": {
+                            "body": {
+                              "os": "{id}"
+                            },
+                            "method": "POST",
+                            "path": "/p/spaces/api/host/import-iso",
+                            "refresh": "reload"
+                          },
+                          "kind": "button",
+                          "label": "Import",
+                          "variant": "pill",
+                          "visibleWhen": {
+                            "equals": "1",
+                            "field": "staged"
+                          }
+                        },
+                        {
+                          "action": {
+                            "body": {
+                              "os": "{id}"
+                            },
+                            "method": "POST",
+                            "path": "/p/spaces/api/host/fetch-iso",
+                            "refresh": "reload"
+                          },
+                          "kind": "button",
+                          "label": "Download",
+                          "variant": "pill",
+                          "visibleWhen": {
+                            "equals": "1",
+                            "field": "can_fetch"
+                          }
+                        }
+                      ],
+                      "kind": "hstack",
+                      "paddingV": 7,
+                      "spacing": 10
+                    },
+                    "kind": "list",
+                    "spacing": 0
+                  }
+                ],
+                "kind": "panel",
+                "label": "Installers",
+                "spacing": 4
               }
             ],
             "kind": "hstack",
-            "paddingH": 22,
-            "paddingV": 12,
-            "spacing": 11
-          },
-          "kind": "list"
-        },
-        "selectionKey": "selectedId",
-        "sidebar": {
-          "children": [
-            {
-              "align": "leading",
-              "children": [
-                {
-                  "kind": "text",
-                  "style": "section-label",
-                  "value": "HYPERVISOR"
-                },
-                {
-                  "align": "center",
-                  "children": [
-                    {
-                      "colorFrom": "host_status_color",
-                      "kind": "dot",
-                      "size": 8
-                    },
-                    {
-                      "bind": "host_status_label",
-                      "kind": "text",
-                      "style": "headline"
-                    }
-                  ],
-                  "kind": "hstack",
-                  "spacing": 8
-                },
-                {
-                  "bind": "host_label",
-                  "color": "secondary",
-                  "hideWhenEmpty": true,
-                  "kind": "text",
-                  "lines": 1,
-                  "style": "mono"
-                }
-              ],
-              "kind": "vstack",
-              "paddingH": 10,
-              "paddingV": 6,
-              "spacing": 5
-            },
-            {
-              "align": "center",
-              "children": [
-                {
-                  "kind": "text",
-                  "style": "caption",
-                  "value": "CPU"
-                },
-                {
-                  "kind": "spacer"
-                },
-                {
-                  "bind": "cpu_label",
-                  "color": "secondary",
-                  "hideWhenEmpty": true,
-                  "kind": "text",
-                  "lines": 1,
-                  "style": "mono"
-                }
-              ],
-              "kind": "hstack",
-              "paddingH": 10,
-              "paddingV": 2,
-              "spacing": 6
-            },
-            {
-              "align": "center",
-              "children": [
-                {
-                  "kind": "text",
-                  "style": "caption",
-                  "value": "Memory"
-                },
-                {
-                  "kind": "spacer"
-                },
-                {
-                  "bind": "memory_label",
-                  "color": "secondary",
-                  "hideWhenEmpty": true,
-                  "kind": "text",
-                  "lines": 1,
-                  "style": "mono"
-                }
-              ],
-              "kind": "hstack",
-              "paddingH": 10,
-              "paddingV": 2,
-              "spacing": 6
-            },
-            {
-              "align": "center",
-              "children": [
-                {
-                  "kind": "text",
-                  "style": "caption",
-                  "value": "IOMMU"
-                },
-                {
-                  "kind": "spacer"
-                },
-                {
-                  "bind": "iommu_label",
-                  "color": "secondary",
-                  "hideWhenEmpty": true,
-                  "kind": "text",
-                  "lines": 1,
-                  "style": "mono"
-                }
-              ],
-              "kind": "hstack",
-              "paddingH": 10,
-              "paddingV": 2,
-              "spacing": 6
-            },
-            {
-              "children": [
-                {
-                  "kind": "text",
-                  "style": "section-label",
-                  "value": "Machines"
-                }
-              ],
-              "kind": "hstack",
-              "paddingH": 10,
-              "paddingTop": 16
-            },
-            {
-              "kind": "searchField",
-              "placeholder": "Search",
-              "stateKey": "query",
-              "width": 208
-            },
-            {
-              "countBind": "space_count",
-              "icon": "macwindow",
-              "kind": "selectRow",
-              "label": "Spaces",
-              "stateKey": "tab",
-              "value": "spaces"
-            },
-            {
-              "countBind": "setup_count",
-              "icon": "wrench.and.screwdriver",
-              "kind": "selectRow",
-              "label": "Host setup",
-              "stateKey": "tab",
-              "value": "setup"
-            },
-            {
-              "countBind": "gpu_count",
-              "icon": "cpu",
-              "kind": "selectRow",
-              "label": "Hardware",
-              "stateKey": "tab",
-              "value": "hardware"
+            "padding": 12,
+            "spacing": 12,
+            "visibleWhen": {
+              "equals": "settings",
+              "state": "tab"
             }
-          ],
-          "kind": "vstack",
-          "spacing": 2
-        },
-        "sidebarWidth": 232
+          }
+        ],
+        "kind": "hstack",
+        "spacing": 0
       },
+      "ephemeralState": [
+        "creating",
+        "form.name",
+        "form.family",
+        "form.os",
+        "form.vcpus",
+        "form.memory_mb",
+        "form.disk_gb",
+        "form.gpu",
+        "form.product_key",
+        "pair_code"
+      ],
+      "hideTitle": true,
       "kind": "screen",
+      "noScrollState": "fills",
+      "noScrollStates": [
+        "fills"
+      ],
+      "sheet": {
+        "fields": [
+          {
+            "kind": "textField",
+            "label": "Name",
+            "placeholder": "win-cad — letters, digits and dashes",
+            "stateKey": "form.name"
+          },
+          {
+            "kind": "text",
+            "paddingTop": 6,
+            "style": "section-label",
+            "value": "OPERATING SYSTEM"
+          },
+          {
+            "kind": "segmented",
+            "options": [
+              {
+                "label": "Windows",
+                "value": "windows"
+              },
+              {
+                "label": "Linux",
+                "value": "linux"
+              },
+              {
+                "label": "BSD",
+                "value": "bsd"
+              }
+            ],
+            "stateKey": "form.family"
+          },
+          {
+            "bind": "os_catalog",
+            "filter": {
+              "equalsState": "form.family",
+              "field": "family"
+            },
+            "item": {
+              "countBind": "standing_label",
+              "kind": "selectRow",
+              "label": "{label}",
+              "stateKey": "form.os",
+              "value": "{id}"
+            },
+            "kind": "list",
+            "spacing": 2
+          },
+          {
+            "bind": "installer_hint",
+            "color": "muted",
+            "kind": "text",
+            "style": "caption",
+            "wrap": true
+          },
+          {
+            "kind": "textField",
+            "label": "Windows product key (optional)",
+            "placeholder": "Blank: installs with a generic key, activate later",
+            "stateKey": "form.product_key"
+          },
+          {
+            "kind": "text",
+            "paddingTop": 6,
+            "style": "section-label",
+            "value": "SIZE"
+          },
+          {
+            "kind": "segmented",
+            "options": [
+              {
+                "label": "4 cores",
+                "value": "4"
+              },
+              {
+                "label": "8 cores",
+                "value": "8"
+              },
+              {
+                "label": "16 cores",
+                "value": "16"
+              },
+              {
+                "label": "24 cores",
+                "value": "24"
+              }
+            ],
+            "stateKey": "form.vcpus"
+          },
+          {
+            "kind": "segmented",
+            "options": [
+              {
+                "label": "8 GB",
+                "value": "8192"
+              },
+              {
+                "label": "16 GB",
+                "value": "16384"
+              },
+              {
+                "label": "32 GB",
+                "value": "32768"
+              },
+              {
+                "label": "64 GB",
+                "value": "65536"
+              }
+            ],
+            "stateKey": "form.memory_mb"
+          },
+          {
+            "kind": "segmented",
+            "options": [
+              {
+                "label": "60 GB disk",
+                "value": "60"
+              },
+              {
+                "label": "120 GB disk",
+                "value": "120"
+              },
+              {
+                "label": "250 GB disk",
+                "value": "250"
+              },
+              {
+                "label": "500 GB disk",
+                "value": "500"
+              }
+            ],
+            "stateKey": "form.disk_gb"
+          },
+          {
+            "kind": "text",
+            "paddingTop": 6,
+            "style": "section-label",
+            "value": "GRAPHICS"
+          },
+          {
+            "bind": "gpu_choices",
+            "item": {
+              "countBind": "note",
+              "kind": "selectRow",
+              "label": "{label}",
+              "stateKey": "form.gpu",
+              "value": "{address}"
+            },
+            "kind": "list",
+            "spacing": 2
+          }
+        ],
+        "presentedWhen": "creating",
+        "submit": {
+          "action": {
+            "body": {
+              "disk_gb": "{form.disk_gb}",
+              "gpu": "{form.gpu}",
+              "memory_mb": "{form.memory_mb}",
+              "name": "{form.name}",
+              "os": "{form.os}",
+              "product_key": "{form.product_key}",
+              "vcpus": "{form.vcpus}"
+            },
+            "method": "POST",
+            "path": "/p/spaces/api/spaces",
+            "refresh": "reload",
+            "setStateFromResponse": {
+              "pair_code": "pairing_code"
+            },
+            "then": [
+              {
+                "key": "creating",
+                "kind": "setState",
+                "value": false
+              },
+              {
+                "method": "POST",
+                "path": "/api/satellite-pair/{pair_code}/approve",
+                "refresh": "none"
+              }
+            ]
+          },
+          "label": "Create"
+        },
+        "title": "New space",
+        "width": 560
+      },
       "state": {
+        "console.name": "",
+        "creating": false,
+        "fills": "on",
+        "form.disk_gb": "120",
+        "form.family": "windows",
+        "form.gpu": "",
+        "form.memory_mb": "16384",
+        "form.name": "",
+        "form.os": "win2k22",
+        "form.product_key": "",
+        "form.vcpus": "8",
+        "pair_code": "",
         "query": "",
         "selectedId": "",
         "tab": "spaces"
       },
       "title": "Spaces"
     }
+  },
+  "privileged_helper": {
+    "program": "scripts/leo-spaces-admin",
+    "sha256": "db57160692a122479766f6ed38aa084683c913624d03a71956b8be236814988b",
+    "purpose": "turn this box into a hypervisor: the packages, libvirt, the guest network and storage, the IOMMU kernel parameters, and binding a PCI device to vfio-pci so a guest can own it",
+    "verbs": [
+      {
+        "verb": "version",
+        "takes_argument": false,
+        "what": "print the wrapper's version — what the package probes to tell a usable grant from a file nothing can run"
+      },
+      {
+        "verb": "install-packages",
+        "takes_argument": false,
+        "what": "install qemu, libvirt, the UEFI firmware and the software TPM this distribution packages"
+      },
+      {
+        "verb": "enable-daemon",
+        "takes_argument": false,
+        "what": "enable and start libvirt, whichever of the monolithic or modular daemons this box has"
+      },
+      {
+        "verb": "setup-network",
+        "takes_argument": false,
+        "what": "define, autostart and start libvirt's default NAT network for guests"
+      },
+      {
+        "verb": "setup-storage",
+        "takes_argument": false,
+        "what": "create the disk, ISO and nvram directories and define the storage pool"
+      },
+      {
+        "verb": "add-group",
+        "takes_argument": false,
+        "what": "add the invoking account to the libvirt group"
+      },
+      {
+        "verb": "fetch-virtio",
+        "takes_argument": false,
+        "what": "download the Windows virtio driver ISO and refuse anything that is not an ISO 9660 image"
+      },
+      {
+        "verb": "enable-iommu",
+        "takes_argument": false,
+        "what": "add the IOMMU kernel parameters, after backing up every boot entry and leaving the fallback entries alone"
+      },
+      {
+        "verb": "bind-vfio",
+        "takes_argument": true,
+        "what": "claim one PCI vendor:device pair for vfio-pci so a guest can own it outright — the pair is matched against a four-hex-digit pattern before it is written anywhere"
+      },
+      {
+        "verb": "unbind-vfio",
+        "takes_argument": false,
+        "what": "give a claimed PCI device back to its normal driver"
+      },
+      {
+        "verb": "fetch-iso",
+        "takes_argument": true,
+        "what": "start downloading one installer image from the catalog this program carries — an OS id, never an address; Windows images are licensed and are not fetched"
+      },
+      {
+        "verb": "import-iso",
+        "takes_argument": true,
+        "what": "adopt an installer image that was fetched as leo into /var/lib/leo/spaces-import — by OS id, after checking it is an ISO — into the root-owned media directory; how a licensed Windows image gets there without a root shell"
+      },
+      {
+        "verb": "build-guest-tools",
+        "takes_argument": true,
+        "what": "pack the Leo guest tools leo staged for one space under /var/lib/leo/spaces-import/guest-tools/<space> — the satellite and its installer — into a CD image in the media directory; the space name, never a path or an address"
+      },
+      {
+        "verb": "open-guest-network",
+        "takes_argument": false,
+        "what": "insert accept rules for the guest bridge (DHCP, DNS and forwarding) ahead of the host firewall's drops, and install the unit that re-applies them after any firewall reload"
+      },
+      {
+        "verb": "apply-guest-network",
+        "takes_argument": false,
+        "what": "re-insert those rules — what the unit runs at boot; takes nothing"
+      }
+    ]
   }
 }

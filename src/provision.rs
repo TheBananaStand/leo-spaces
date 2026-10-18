@@ -51,6 +51,12 @@ pub struct Step {
     pub verb: Option<String>,
     pub risk: Risk,
     pub needs_reboot: bool,
+    /// The host is configured for this step but has not acted on it yet — a
+    /// boot-time change written and waiting for the reboot. Distinct from
+    /// `satisfied` (the host already does it) and from pending (nothing has
+    /// been written). Without it, "apply, reboot, still not done" and "never
+    /// applied" drew the same row.
+    pub applied: bool,
     /// Steps that must be satisfied first. Applying out of order is refused
     /// rather than attempted — `virsh net-start` before libvirt is installed
     /// fails in a way that reads like a broken network, not a missed step.
@@ -150,6 +156,7 @@ pub fn plan(f: &Facts) -> Plan {
             verb: None,
             risk: Risk::Safe,
             needs_reboot: false,
+            applied: false,
             requires: vec![],
             blocked: Some("enable virtualisation in the firmware setup, then reboot".into()),
         });
@@ -157,7 +164,8 @@ pub fn plan(f: &Facts) -> Plan {
 
     // ── Packages ────────────────────────────────────────────────────────────
     let pkgs = packages(f.package_manager);
-    let pkg_satisfied = f.qemu_installed && f.libvirt_installed && f.ovmf_installed && f.swtpm_installed;
+    let pkg_satisfied =
+        f.qemu_installed && f.libvirt_installed && f.ovmf_installed && f.swtpm_installed;
     steps.push(Step {
         id: "packages".into(),
         title: "Hypervisor packages".into(),
@@ -174,6 +182,7 @@ pub fn plan(f: &Facts) -> Plan {
         verb: Some("install-packages".into()),
         risk: Risk::Safe,
         needs_reboot: false,
+        applied: false,
         requires: vec![],
         blocked: if pkgs.is_empty() {
             Some(format!("unrecognised distribution ({})", if f.os_id.is_empty() { "unknown" } else { &f.os_id }))
@@ -194,6 +203,7 @@ pub fn plan(f: &Facts) -> Plan {
         verb: Some("enable-daemon".into()),
         risk: Risk::Safe,
         needs_reboot: false,
+        applied: false,
         requires: vec!["packages".into()],
         blocked: blocked_by_privilege(f),
     });
@@ -208,27 +218,50 @@ pub fn plan(f: &Facts) -> Plan {
         verb: Some("setup-network".into()),
         risk: Risk::Safe,
         needs_reboot: false,
+        applied: false,
         requires: vec!["daemon".into()],
+        blocked: blocked_by_privilege(f),
+    });
+
+    // ── The host firewall, opened for guests ────────────────────────────
+    steps.push(Step {
+        id: "guest-net".into(),
+        title: "Guest network through the firewall".into(),
+        detail: "Lets guests on the `default` network get an address from the host and reach the internet. Leo OS's firewall drops both by default \u{2014} a Windows guest then reports an unidentified network with no internet \u{2014} so this inserts accept rules for the guest bridge ahead of its drops, and a unit re-applies them whenever the firewall reloads.".into(),
+        satisfied: f.guest_net_open,
+        command: p.wrap("open-guest-network"),
+        verb: Some("open-guest-network".into()),
+        risk: Risk::Safe,
+        needs_reboot: false,
+        applied: false,
+        requires: vec!["network".into()],
         blocked: blocked_by_privilege(f),
     });
 
     // ── Storage ─────────────────────────────────────────────────────────────
     //
-    // Satisfaction is not probed from facts: the pool existing is cheap to
-    // check and cheap to re-apply, and `pool-define-as` on an existing pool is
-    // a no-op. Reporting it as pending on a host where it is already there
-    // would be a lie, so the probe for it rides along with the libvirt check.
+    // Satisfaction IS probed, and the comment that used to sit here said why
+    // while the code did the opposite: it read "reporting it as pending on a
+    // host where it is already there would be a lie" above a hardcoded
+    // `satisfied: false`. The probe it promised (`pool_ready`, riding along
+    // with the libvirt checks) now exists.
+    //
+    // It was never only cosmetic: `virtio` requires `storage`, so a step that
+    // could never be satisfied left virtio permanently unapplicable and the
+    // setup list unable to reach a finished state — `apply virtio` answered
+    // "needs storage applied first" immediately after storage had succeeded.
     steps.push(Step {
         id: "storage".into(),
         title: "Space storage".into(),
         detail: format!(
             "Creates {STATE_DIR} for disks, firmware variables and installer media, and registers it with libvirt as the `{POOL}` pool. Keeping it out of /var/lib/libvirt means this package's disks are identifiable as its own."
         ),
-        satisfied: false,
+        satisfied: f.pool_ready,
         command: p.wrap("setup-storage"),
         verb: Some("setup-storage".into()),
         risk: Risk::Safe,
         needs_reboot: false,
+        applied: false,
         requires: vec!["daemon".into()],
         blocked: blocked_by_privilege(f),
     });
@@ -243,6 +276,7 @@ pub fn plan(f: &Facts) -> Plan {
         verb: Some("add-group".into()),
         risk: Risk::Safe,
         needs_reboot: false,
+        applied: false,
         requires: vec!["packages".into()],
         blocked: blocked_by_privilege(f),
     });
@@ -252,11 +286,14 @@ pub fn plan(f: &Facts) -> Plan {
         id: "virtio".into(),
         title: "Windows virtio drivers".into(),
         detail: "Downloads the signed virtio-win driver ISO. Windows setup cannot see a virtio disk without it — the installer reaches the \"where do you want to install\" screen and lists nothing, which is the single most common way a Windows guest fails for a reason that looks like broken storage.".into(),
-        satisfied: false,
+        // Probed like storage is: the same hardcoded `false` sat here, so the
+        // ISO could be on disk and the step still read Pending.
+        satisfied: f.virtio_iso_present,
         command: p.wrap("fetch-virtio"),
         verb: Some("fetch-virtio".into()),
         risk: Risk::Safe,
         needs_reboot: false,
+        applied: false,
         requires: vec!["storage".into()],
         blocked: blocked_by_privilege(f),
     });
@@ -287,6 +324,7 @@ pub fn plan(f: &Facts) -> Plan {
         verb: Some("enable-iommu".into()),
         risk: Risk::Boot,
         needs_reboot: true,
+        applied: false,
         requires: vec![],
         blocked: match f.bootloader {
             Bootloader::Unknown => Some(
@@ -301,29 +339,56 @@ pub fn plan(f: &Facts) -> Plan {
     // Only offered for a card that can actually be handed over. A blocked
     // candidate still produces a step, because the reason is the useful part.
     for gpu in f.gpus.iter().filter(|g| !g.integrated) {
-        let blockers = gpu.passthrough_blockers();
-        let bound = gpu.driver == "vfio-pci";
+        let blockers = gpu.passthrough_blockers(&f.gpus);
+        // The whole card, every function: a group with one function still
+        // on its host driver is "not viable" and the guest refuses to start
+        // — which is exactly how the A4000's HDMI audio stopped a guest.
+        let bound = gpu.fully_bound();
+        let ids = gpu.all_ids().join(",");
+        let configured = gpu
+            .all_ids()
+            .iter()
+            .all(|id| f.vfio_ids.iter().any(|i| i == id));
+        // Three states past "nothing written", and the row has to say which:
+        // the config is in and a reboot is what is left; or the reboot
+        // happened and the card is still where it was, which is a failed
+        // binding and not a step somebody forgot.
+        let standing = if bound || !configured {
+            String::new()
+        } else if f.vfio_config_predates_boot {
+            format!(
+                " Configured, but after a reboot the card is not vfio-pci's: {} — the binding did not take. Apply again: the helper carries vfio_pci into the initramfs itself and checks that it did.",
+                gpu.held_functions().join(", ")
+            )
+        } else {
+            " Configured — reboot to let vfio-pci claim it.".to_string()
+        };
         steps.push(Step {
             id: format!("vfio:{}", gpu.address),
             title: format!("Pass through {}", short_gpu_name(&gpu.name)),
             detail: format!(
-                "Binds {} ({}) to vfio-pci at boot so one space can own it outright. {} Needs a reboot.",
-                gpu.address,
-                gpu.ids,
-                if gpu.group_siblings.is_empty() {
-                    "It is alone in its IOMMU group, so nothing else goes with it.".to_string()
+                "Binds {} ({}) to vfio-pci at boot so one space can own it outright. {} Needs a reboot.{standing}",
+                gpu.all_addresses().join(" + "),
+                ids,
+                // Said in terms of OTHER devices. A card's own audio function
+                // is in the group and goes with it, which is correct and not
+                // worth alarming anybody about.
+                if gpu.foreign_siblings().is_empty() {
+                    "Nothing else of the host's is in its IOMMU group, so only the card goes."
+                        .to_string()
                 } else {
                     format!(
                         "Its IOMMU group also holds {}, which VFIO claims together with it.",
-                        gpu.group_siblings.join(", ")
+                        gpu.foreign_siblings().join(", ")
                     )
                 }
             ),
             satisfied: bound,
-            command: p.wrap(&format!("bind-vfio {}", gpu.ids)),
-            verb: Some(format!("bind-vfio {}", gpu.ids)),
+            command: p.wrap(&format!("bind-vfio {ids}")),
+            verb: Some(format!("bind-vfio {ids}")),
             risk: Risk::Boot,
             needs_reboot: true,
+            applied: configured && !bound,
             requires: vec!["iommu".into()],
             blocked: if !blockers.is_empty() {
                 Some(blockers.join("; "))
@@ -334,7 +399,10 @@ pub fn plan(f: &Facts) -> Plan {
     }
 
     let satisfied = steps.iter().filter(|s| s.satisfied).count();
-    let blocked = steps.iter().filter(|s| !s.satisfied && s.blocked.is_some()).count();
+    let blocked = steps
+        .iter()
+        .filter(|s| !s.satisfied && s.blocked.is_some())
+        .count();
     let pending = steps.iter().filter(|s| s.applicable()).count();
 
     // "Ready for guests" deliberately ignores the boot steps: a host with no
@@ -370,7 +438,7 @@ fn blocked_by_privilege(f: &Facts) -> Option<String> {
 /// Named precisely rather than described, because the gap between "you need
 /// more privileges" and a command somebody can paste is the entire difference
 /// between a package that works and one that gets uninstalled.
-fn privilege_handover(f: &Facts) -> String {
+pub fn privilege_handover(f: &Facts) -> String {
     if f.wrapper_installed {
         format!(
             "{WRAPPER} is installed but not permitted — the sudoers rule for it is missing. Re-run `sudo bash scripts/install-admin-wrapper.sh` to restore it."
@@ -396,7 +464,11 @@ fn short_gpu_name(full: &str) -> String {
             }
         }
     }
-    full.split(':').next_back().unwrap_or(full).trim().to_string()
+    full.split(':')
+        .next_back()
+        .unwrap_or(full)
+        .trim()
+        .to_string()
 }
 
 /// Look up a step by id in a freshly derived plan.
@@ -423,6 +495,165 @@ mod tests {
     use super::*;
     use crate::facts::{CpuVendor, Gpu, Privilege};
     use crate::host::Host;
+
+    /// **A pool that exists is Done, and virtio becomes reachable.**
+    ///
+    /// `storage` used to be hardcoded `satisfied: false`, so it could never
+    /// complete — and `virtio` requires it, so `apply virtio` answered "needs
+    /// storage applied first" even immediately after storage had succeeded.
+    /// The setup list could not reach a finished state on any host. Measured
+    /// on leo-virt: the pool was `active / running / 1.82 TiB` while the plan
+    /// still called the step pending.
+    #[test]
+    fn a_running_pool_satisfies_storage_and_unblocks_virtio() {
+        let mut f = work_hub();
+        f.qemu_installed = true;
+        f.libvirt_installed = true;
+        f.ovmf_installed = true;
+        f.swtpm_installed = true;
+        f.libvirt_running = true;
+
+        // Without the pool, storage is the thing left to do and virtio waits.
+        f.pool_ready = false;
+        let p = plan(&f);
+        let storage = step(&p, "storage").expect("a storage step");
+        assert!(!storage.satisfied, "no pool, so storage is not done");
+        assert!(
+            !unmet_requirements(&p, step(&p, "virtio").expect("a virtio step")).is_empty(),
+            "virtio must wait for storage while the pool is absent"
+        );
+
+        // With it, storage is done and virtio is free to run.
+        f.pool_ready = true;
+        let p = plan(&f);
+        let storage = step(&p, "storage").expect("a storage step");
+        assert!(
+            storage.satisfied,
+            "a running pool must satisfy storage — hardcoding false is what left \
+             virtio permanently unapplicable"
+        );
+        assert!(
+            unmet_requirements(&p, step(&p, "virtio").expect("a virtio step")).is_empty(),
+            "with the pool up, virtio has nothing left to wait for"
+        );
+        assert!(
+            !step(&p, "virtio").expect("a virtio step").satisfied,
+            "no ISO on disk, so virtio is not done"
+        );
+
+        // And with the ISO on disk, virtio is done too.
+        f.virtio_iso_present = true;
+        let p = plan(&f);
+        assert!(
+            step(&p, "virtio").expect("a virtio step").satisfied,
+            "a present ISO must satisfy virtio — the same hardcoded false sat under this step"
+        );
+    }
+
+    /// A card is several PCI functions in one IOMMU group, and VFIO claims
+    /// the group: the step binds and reports every function, so a guest is
+    /// never refused with "group is not viable" over an HDMI audio device.
+    #[test]
+    fn the_step_binds_every_function_of_the_card() {
+        use crate::facts::Function;
+        let mut f = work_hub();
+        f.gpus.push(crate::facts::Gpu {
+            address: "0000:01:00.0".into(),
+            ids: "10de:24b0".into(),
+            name: "NVIDIA Corporation GA104GL [RTX A4000]".into(),
+            driver: "vfio-pci".into(),
+            iommu_group: Some(29),
+            group_siblings: vec!["0000:01:00.1".into()],
+            is_boot_vga: false,
+            integrated: false,
+            functions: vec![Function {
+                address: "0000:01:00.1".into(),
+                ids: "10de:228b".into(),
+                driver: "snd_hda_intel".into(),
+            }],
+        });
+        f.vfio_ids = vec!["10de:24b0".into()];
+        f.vfio_config_predates_boot = true;
+        let p = plan(&f);
+        let s = step(&p, "vfio:0000:01:00.0").expect("the step");
+        assert!(
+            !s.satisfied,
+            "the audio function is still the host's, so the card is not passable yet"
+        );
+        assert_eq!(s.verb.as_deref(), Some("bind-vfio 10de:24b0,10de:228b"));
+        assert!(!s.applied, "only half the ids are configured");
+        assert!(
+            s.detail.contains("0000:01:00.0 + 0000:01:00.1"),
+            "{}",
+            s.detail
+        );
+
+        f.gpus[1].functions[0].driver = "vfio-pci".into();
+        let p = plan(&f);
+        assert!(step(&p, "vfio:0000:01:00.0").unwrap().satisfied);
+    }
+
+    /// A card `bind-vfio` has been run for is three different rows depending
+    /// on what the host did with it: written and waiting for a reboot;
+    /// rebooted and still held by its own driver, which is a binding that did
+    /// not take; or claimed, which is done. The first two drew identically
+    /// until a real reboot changed nothing and the row said so in no way.
+    #[test]
+    fn a_configured_card_is_applied_until_the_reboot_and_says_when_it_did_not_take() {
+        let mut f = work_hub();
+        f.gpus.push(crate::facts::Gpu {
+            address: "0000:01:00.0".into(),
+            ids: "10de:24b0".into(),
+            name: "NVIDIA Corporation GA104GL [RTX A4000]".into(),
+            driver: "nvidia".into(),
+            iommu_group: Some(29),
+            group_siblings: vec!["0000:01:00.1".into()],
+            is_boot_vga: false,
+            integrated: false,
+            functions: vec![],
+        });
+        let id = "vfio:0000:01:00.0";
+
+        // Nothing written: pending, and the detail says nothing about state.
+        let p = plan(&f);
+        let s = step(&p, id).expect("a passthrough step");
+        assert!(!s.satisfied && !s.applied, "{s:?}");
+        assert!(!s.detail.contains("Configured"), "{}", s.detail);
+
+        // Written, no reboot yet: applied, and the row says to reboot.
+        f.vfio_ids = vec!["10de:24b0".into()];
+        f.vfio_config_predates_boot = false;
+        let p = plan(&f);
+        let s = step(&p, id).expect("a passthrough step");
+        assert!(s.applied && !s.satisfied, "{s:?}");
+        assert!(
+            s.detail.contains("reboot to let vfio-pci claim it"),
+            "{}",
+            s.detail
+        );
+
+        // Rebooted, still nvidia's: applied, and the row says it did not take
+        // and names the holder.
+        f.vfio_config_predates_boot = true;
+        let p = plan(&f);
+        let s = step(&p, id).expect("a passthrough step");
+        assert!(s.applied && !s.satisfied, "{s:?}");
+        assert!(s.detail.contains("did not take"), "{}", s.detail);
+        assert!(s.detail.contains("0000:01:00.0 (nvidia)"), "{}", s.detail);
+
+        // Claimed: done, and no longer "applied" — that word is for waiting.
+        // (The fixture's integrated GPU sits at index 0; the card is last.)
+        f.gpus.last_mut().unwrap().driver = "vfio-pci".into();
+        let p = plan(&f);
+        let s = step(&p, id).expect("a passthrough step");
+        assert!(s.satisfied && !s.applied, "{s:?}");
+
+        // A different card's id in the config is not this card configured.
+        f.gpus.last_mut().unwrap().driver = "nvidia".into();
+        f.vfio_ids = vec!["1002:73df".into()];
+        let p = plan(&f);
+        assert!(!step(&p, id).expect("a passthrough step").applied);
+    }
 
     /// A host shaped like the work hub: Arch, AMD, systemd-boot, nothing
     /// installed, integrated graphics only, and the wrapper in place.
@@ -452,6 +683,7 @@ mod tests {
             group_siblings: vec![],
             is_boot_vga: true,
             integrated: true,
+            functions: vec![],
         }];
         f
     }
@@ -463,7 +695,9 @@ mod tests {
     fn a_bare_host_gets_a_full_plan() {
         let p = plan(&work_hub());
         let ids: Vec<&str> = p.steps.iter().map(|s| s.id.as_str()).collect();
-        for want in ["packages", "daemon", "network", "storage", "group", "virtio", "iommu"] {
+        for want in [
+            "packages", "daemon", "network", "storage", "group", "virtio", "iommu",
+        ] {
             assert!(ids.contains(&want), "plan should include {want}: {ids:?}");
         }
         assert!(!p.guests_ready);
@@ -498,6 +732,7 @@ mod tests {
             group_siblings: vec!["0000:00:1f.2".into()],
             is_boot_vga: false,
             integrated: false,
+            functions: vec![],
         });
         let p = plan(&f);
         let s = step(&p, "vfio:0000:01:00.0").expect("discrete card should get a step");
@@ -525,11 +760,16 @@ mod tests {
             group_siblings: vec![],
             is_boot_vga: false,
             integrated: false,
+            functions: vec![],
         });
         let p = plan(&f);
         let s = step(&p, "vfio:0000:01:00.0").unwrap();
         assert!(s.applicable(), "blocked: {:?}", s.blocked);
-        assert!(s.command.as_deref().unwrap().contains("bind-vfio 10de:24b0"));
+        assert!(s
+            .command
+            .as_deref()
+            .unwrap()
+            .contains("bind-vfio 10de:24b0"));
     }
 
     /// The boot-touching steps must be distinguishable from the rest, because
@@ -541,7 +781,9 @@ mod tests {
         assert_eq!(iommu.risk, Risk::Boot);
         assert!(iommu.needs_reboot);
 
-        for id in ["packages", "daemon", "network", "storage", "group", "virtio"] {
+        for id in [
+            "packages", "daemon", "network", "storage", "group", "virtio",
+        ] {
             let s = step(&p, id).unwrap();
             assert_eq!(s.risk, Risk::Safe, "{id} should be safe");
             assert!(!s.needs_reboot, "{id} should not need a reboot");
@@ -559,19 +801,32 @@ mod tests {
         f.wrapper_usable = false;
 
         let p = plan(&f);
-        assert!(p.handover.as_deref().unwrap().contains("install-admin-wrapper.sh"));
-        assert!(p.handover.as_deref().unwrap().contains("leo-work"), "should name the host");
+        assert!(p
+            .handover
+            .as_deref()
+            .unwrap()
+            .contains("install-admin-wrapper.sh"));
+        assert!(
+            p.handover.as_deref().unwrap().contains("leo-work"),
+            "should name the host"
+        );
 
         // The package step falls back to the distro's own install command, so
         // there is something to paste even with no wrapper at all.
         let pkg = step(&p, "packages").unwrap();
         let cmd = pkg.command.as_deref().expect("a command to paste");
-        assert!(cmd.contains("pacman -S"), "should fall back to pacman: {cmd}");
+        assert!(
+            cmd.contains("pacman -S"),
+            "should fall back to pacman: {cmd}"
+        );
         assert!(cmd.contains("edk2-ovmf"), "Windows needs OVMF: {cmd}");
         assert!(cmd.contains("swtpm"), "Windows 11 needs a TPM: {cmd}");
         // But it is not applicable, because this process cannot run it.
         assert!(!pkg.applicable());
-        assert_eq!(p.pending, 0, "nothing is pending when nothing can be applied");
+        assert_eq!(
+            p.pending, 0,
+            "nothing is pending when nothing can be applied"
+        );
     }
 
     /// A wrapper on disk with no rule gets its own message — "install it" is
@@ -598,8 +853,16 @@ mod tests {
         let s = step(&p, "virt").expect("should name the problem");
         assert!(s.blocked.is_some());
         assert!(s.command.is_none(), "nothing can fix this from software");
-        assert!(s.detail.contains("AMD-V"), "should say what to look for: {}", s.detail);
-        assert!(s.detail.contains("9950X"), "should name the CPU: {}", s.detail);
+        assert!(
+            s.detail.contains("AMD-V"),
+            "should say what to look for: {}",
+            s.detail
+        );
+        assert!(
+            s.detail.contains("9950X"),
+            "should name the CPU: {}",
+            s.detail
+        );
     }
 
     /// An unrecognised distro is blocked with its id named, and crucially does
@@ -636,6 +899,7 @@ mod tests {
                 group_siblings: vec![],
                 is_boot_vga: false,
                 integrated: false,
+                functions: vec![],
             });
             f
         });
@@ -674,12 +938,17 @@ mod tests {
             "RTX A4000"
         );
         assert_eq!(
-            short_gpu_name("Advanced Micro Devices, Inc. [AMD/ATI] Granite Ridge [Radeon Graphics]"),
+            short_gpu_name(
+                "Advanced Micro Devices, Inc. [AMD/ATI] Granite Ridge [Radeon Graphics]"
+            ),
             "Radeon Graphics"
         );
         // No brackets: fall back to the last colon-separated part rather than
         // returning the PCI class boilerplate.
-        assert_eq!(short_gpu_name("3D controller: Some Card 9000"), "Some Card 9000");
+        assert_eq!(
+            short_gpu_name("3D controller: Some Card 9000"),
+            "Some Card 9000"
+        );
     }
 
     /// The IOMMU step must name the right parameter for the host's CPU.

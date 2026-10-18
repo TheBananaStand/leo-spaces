@@ -22,11 +22,16 @@ pub fn router() -> Router<AppState> {
         .route("/api/host", get(host))
         .route("/api/host/plan", get(plan))
         .route("/api/host/apply", post(apply))
+        .route("/api/host/installers", get(installers))
+        .route("/api/host/fetch-iso", post(fetch_iso))
+        .route("/api/host/import-iso", post(import_iso))
         .route("/api/spaces", get(list).post(create))
         .route("/api/spaces/{name}", axum::routing::delete(remove))
         .route("/api/spaces/{name}/control", post(control))
         .route("/api/spaces/{name}/gpu", post(gpu))
         .route("/api/spaces/{name}/snapshot", post(snapshot))
+        .route("/api/spaces/{name}/guest-tools", post(guest_tools))
+        .route("/api/spaces/{name}/console/ws", get(crate::console::socket))
 }
 
 /// Liveness, no auth. The hub polls this to decide whether the subprocess came
@@ -43,7 +48,9 @@ async fn host(_c: Caller, State(s): State<AppState>) -> Result<Json<Value>, Erro
 
 async fn plan(_c: Caller, State(s): State<AppState>) -> Result<Json<Value>, Error> {
     let f = facts::probe(&s.cfg.host).await?;
-    Ok(Json(serde_json::to_value(provision::plan(&f)).unwrap_or_default()))
+    Ok(Json(
+        serde_json::to_value(provision::plan(&f)).unwrap_or_default(),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -75,7 +82,10 @@ async fn apply(
         })));
     }
     if let Some(reason) = &step.blocked {
-        return Err(Error::Other(format!("'{}' cannot run here: {reason}", step.id)));
+        return Err(Error::Other(format!(
+            "'{}' cannot run here: {reason}",
+            step.id
+        )));
     }
     let unmet = provision::unmet_requirements(&p, step);
     if !unmet.is_empty() {
@@ -111,6 +121,80 @@ async fn apply(
     })))
 }
 
+/// Every OS the catalog offers, with what the host has of its installer.
+async fn installers(_c: Caller, State(s): State<AppState>) -> Result<Json<Value>, Error> {
+    let f = facts::probe(&s.cfg.host).await?;
+    Ok(Json(
+        serde_json::to_value(crate::installers::list(&f)).unwrap_or_default(),
+    ))
+}
+
+#[derive(Deserialize)]
+struct FetchIsoBody {
+    /// A catalog id. Never an address: the helper holds the addresses, and a
+    /// request can only choose among them.
+    os: String,
+}
+
+/// Start downloading one catalog installer onto the host. Returns at once;
+/// the Installers panel shows the download's progress and its failure.
+async fn fetch_iso(
+    _c: AdminCaller,
+    State(s): State<AppState>,
+    Json(body): Json<FetchIsoBody>,
+) -> Result<Json<Value>, Error> {
+    let os = crate::catalog::find(&body.os)
+        .ok_or_else(|| Error::Other(format!("'{}' is not in the OS catalog", body.os)))?;
+    if os.source.is_none() {
+        return Err(Error::Other(format!(
+            "{} is licensed, so it is not downloaded — put the image at {}",
+            os.label,
+            os.iso_path()
+        )));
+    }
+    let f = facts::probe(&s.cfg.host).await?;
+    let Some(command) = f.privilege.wrap(&format!("fetch-iso {}", os.id)) else {
+        return Err(Error::Other(provision::privilege_handover(&f)));
+    };
+    let out = s.cfg.host.run(&command).await?;
+    if !out.ok() {
+        return Err(Error::Other(format!(
+            "fetch-iso {} failed: {}",
+            os.id,
+            out.failure()
+        )));
+    }
+    Ok(Json(
+        json!({ "ok": true, "os": os.id, "output": out.trimmed() }),
+    ))
+}
+
+/// Adopt an installer that was fetched as leo into the import directory —
+/// the way a licensed image reaches the root-owned media directory.
+async fn import_iso(
+    _c: AdminCaller,
+    State(s): State<AppState>,
+    Json(body): Json<FetchIsoBody>,
+) -> Result<Json<Value>, Error> {
+    let os = crate::catalog::find(&body.os)
+        .ok_or_else(|| Error::Other(format!("'{}' is not in the OS catalog", body.os)))?;
+    let f = facts::probe(&s.cfg.host).await?;
+    let Some(command) = f.privilege.wrap(&format!("import-iso {}", os.id)) else {
+        return Err(Error::Other(provision::privilege_handover(&f)));
+    };
+    let out = s.cfg.host.run(&command).await?;
+    if !out.ok() {
+        return Err(Error::Other(format!(
+            "import-iso {} failed: {}",
+            os.id,
+            out.failure()
+        )));
+    }
+    Ok(Json(
+        json!({ "ok": true, "os": os.id, "output": out.trimmed() }),
+    ))
+}
+
 async fn list(_c: Caller, State(s): State<AppState>) -> Result<Json<Value>, Error> {
     let list = spaces::list(&s.cfg.host).await?;
     Ok(Json(serde_json::to_value(list).unwrap_or_default()))
@@ -122,7 +206,45 @@ async fn create(
     Json(req): Json<spaces::NewSpace>,
 ) -> Result<Json<Value>, Error> {
     let f = facts::probe(&s.cfg.host).await?;
-    let msg = spaces::create(&s.cfg.host, &f, &req).await?;
+    let created = spaces::create(
+        &s.cfg.host,
+        &f,
+        &req,
+        s.cfg.guest_hub.as_deref(),
+        &s.cfg.leo_api_url,
+    )
+    .await?;
+    // The approval comes from the sheet's next action, with the caller's own
+    // session; this waits for it in the background and puts the token on
+    // the CD. See `guest_tools::finish_pairing`.
+    if let (Some(plan), false) = (created.pairing.clone(), created.pairing_code.is_empty()) {
+        tokio::spawn(crate::guest_tools::finish_pairing(
+            s.cfg.host.clone(),
+            f,
+            req.name.clone(),
+            created.hub.clone(),
+            plan,
+            s.cfg.leo_api_url.clone(),
+            created.pairing_code.clone(),
+        ));
+    }
+    Ok(Json(json!({
+        "ok": true,
+        "message": created.message,
+        "pairing_code": created.pairing_code,
+        "admin_password": created.admin_password,
+    })))
+}
+
+/// Build the guest tools CD for an existing space and attach it.
+async fn guest_tools(
+    _c: AdminCaller,
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, Error> {
+    let f = facts::probe(&s.cfg.host).await?;
+    let msg =
+        spaces::attach_guest_tools(&s.cfg.host, &f, &name, s.cfg.guest_hub.as_deref()).await?;
     Ok(Json(json!({ "ok": true, "message": msg })))
 }
 
@@ -164,7 +286,9 @@ async fn control(
     let action = spaces::Action::parse(&body.action)
         .ok_or_else(|| Error::Other(format!("'{}' is not a space action", body.action)))?;
     spaces::control(&s.cfg.host, &name, action).await?;
-    Ok(Json(json!({ "ok": true, "message": format!("{name}: {}", body.action) })))
+    Ok(Json(
+        json!({ "ok": true, "message": format!("{name}: {}", body.action) }),
+    ))
 }
 
 #[derive(Deserialize)]

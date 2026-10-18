@@ -51,11 +51,12 @@ fn spaces_tool() -> Value {
                     "description": "What to do"
                 },
                 "name": { "type": "string", "description": "The space's name. Required for everything except list and create-with-defaults." },
-                "os": { "type": "string", "description": "For create: a libosinfo id — win2k22 (default, and the only Windows that licenses several concurrent sessions), win2k25, win2k19, win11, win10, or a Linux id like linux2022." },
+                "os": { "type": "string", "description": "For create: an id from spaces_host installers — win2k22 (default; Windows Server licenses several concurrent sessions), win2k25, win2k19, win11, win10, ubuntu24.04, ubuntu26.04, debian13, fedora43, archlinux, rocky10, rocky9, almalinux10, opensuse16.0, opensusetumbleweed, freebsd15.0, freebsd14.3. Its installer has to be on the host first." },
                 "vcpus": { "type": "integer", "description": "For create: virtual CPUs. Default 8." },
                 "memory_mb": { "type": "integer", "description": "For create: RAM in MB. Default 16384." },
                 "disk_gb": { "type": "integer", "description": "For create: disk size in GB. Default 120." },
                 "iso": { "type": "string", "description": "For create: path on the host to an installer image." },
+                "product_key": { "type": "string", "description": "For create, Windows only: a product key. Blank installs with a generic key and activates later." },
                 "gpu": { "type": "string", "description": "PCI address of a GPU, e.g. 0000:01:00.0. For create and assign_gpu." },
                 "label": { "type": "string", "description": "For snapshot and restore: the snapshot name." },
                 "keep_disk": { "type": "boolean", "description": "For delete: keep the disk image. Defaults to true — a Windows install with somebody's work on it is not deleted as a side effect." }
@@ -74,10 +75,11 @@ fn host_tool() -> Value {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["status", "plan", "apply", "gpus"],
-                    "description": "status: what the host is. plan: every setup step and whether it is satisfied. apply: run one step by id. gpus: graphics devices and whether each can be given to a guest."
+                    "enum": ["status", "plan", "apply", "gpus", "installers", "fetch_iso", "import_iso"],
+                    "description": "status: what the host is. plan: every setup step and whether it is satisfied. apply: run one step by id. gpus: graphics devices and whether each can be given to a guest. installers: every operating system a space can be made from, and whether its installer image is on the host. fetch_iso: start downloading one (Linux, BSD and Windows Server evaluation media). import_iso: adopt an image somebody put at /var/lib/leo/spaces-import/<id>.iso on the host — how a licensed Windows 10 or 11 ISO gets in."
                 },
-                "step": { "type": "string", "description": "For apply: a step id from plan, e.g. packages, daemon, network, storage, group, virtio, iommu, or vfio:0000:01:00.0." }
+                "step": { "type": "string", "description": "For apply: a step id from plan, e.g. packages, daemon, network, storage, group, virtio, iommu, or vfio:0000:01:00.0." },
+                "os": { "type": "string", "description": "For fetch_iso: a catalog id from installers, e.g. ubuntu24.04, debian13, archlinux." }
             },
             "required": ["action"]
         }
@@ -106,11 +108,11 @@ pub fn validate(tool: &str, action: &str, args: &Value) -> Result<(), String> {
         // are named by the dispatch.
         (
             "spaces",
-            "get" | "start" | "shutdown" | "restart" | "reboot" | "force_off" | "destroy"
-            | "pause" | "suspend" | "resume" | "autostart_on" | "autostart_off" | "delete"
-            | "release_gpu",
+            "get" | "start" | "shutdown" | "restart" | "reboot" | "force_off" | "destroy" | "pause"
+            | "suspend" | "resume" | "autostart_on" | "autostart_off" | "delete" | "release_gpu",
         ) => &["name"],
         ("spaces_host", "apply") => &["step"],
+        ("spaces_host", "fetch_iso" | "import_iso") => &["os"],
         _ => &[],
     };
 
@@ -166,7 +168,12 @@ async fn dispatch(cfg: &Config, tool: &str, args: &Value) -> Result<Value, Strin
 
     validate(tool, action, args)?;
 
-    let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let s = |k: &str| {
+        args.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
     let host = &cfg.host;
 
     match (tool, action) {
@@ -194,8 +201,8 @@ async fn dispatch(cfg: &Config, tool: &str, args: &Value) -> Result<Value, Strin
                             "shares_group_with": g.group_siblings,
                             "integrated": g.integrated,
                             "host_display": g.is_boot_vga,
-                            "can_pass_through": g.passthrough_blockers().is_empty(),
-                            "blockers": g.passthrough_blockers(),
+                            "can_pass_through": g.passthrough_blockers(&f.gpus).is_empty(),
+                            "blockers": g.passthrough_blockers(&f.gpus),
                         })
                     })
                     .collect();
@@ -260,6 +267,70 @@ async fn dispatch(cfg: &Config, tool: &str, args: &Value) -> Result<Value, Strin
             }
         }
 
+        ("spaces_host", "installers") => match facts::probe(host).await {
+            Ok(f) => Ok(tool_ok(as_json(&crate::installers::list(&f)))),
+            Err(e) => Ok(tool_err(format!("could not read the host: {e}"))),
+        },
+
+        ("spaces_host", "fetch_iso") => {
+            let id = s("os");
+            let Some(os) = crate::catalog::find(&id) else {
+                return Ok(tool_err(format!(
+                    "'{id}' is not in the OS catalog. One of: {}",
+                    crate::catalog::ids().join(", ")
+                )));
+            };
+            if os.source.is_none() {
+                return Ok(tool_err(format!(
+                    "{} is licensed, so it is not downloaded — the image goes at {}",
+                    os.label,
+                    os.iso_path()
+                )));
+            }
+            let f = match facts::probe(host).await {
+                Ok(f) => f,
+                Err(e) => return Ok(tool_err(format!("could not read the host: {e}"))),
+            };
+            let Some(cmd) = f.privilege.wrap(&format!("fetch-iso {}", os.id)) else {
+                return Ok(tool_err(provision::privilege_handover(&f)));
+            };
+            match host.run(&cmd).await {
+                Ok(out) if out.ok() => Ok(tool_ok(out.trimmed().to_string())),
+                Ok(out) => Ok(tool_err(format!(
+                    "fetch-iso {} failed: {}",
+                    os.id,
+                    out.failure()
+                ))),
+                Err(e) => Ok(tool_err(format!("fetch-iso could not run: {e}"))),
+            }
+        }
+
+        ("spaces_host", "import_iso") => {
+            let id = s("os");
+            let Some(os) = crate::catalog::find(&id) else {
+                return Ok(tool_err(format!(
+                    "'{id}' is not in the OS catalog. One of: {}",
+                    crate::catalog::ids().join(", ")
+                )));
+            };
+            let f = match facts::probe(host).await {
+                Ok(f) => f,
+                Err(e) => return Ok(tool_err(format!("could not read the host: {e}"))),
+            };
+            let Some(cmd) = f.privilege.wrap(&format!("import-iso {}", os.id)) else {
+                return Ok(tool_err(provision::privilege_handover(&f)));
+            };
+            match host.run(&cmd).await {
+                Ok(out) if out.ok() => Ok(tool_ok(out.trimmed().to_string())),
+                Ok(out) => Ok(tool_err(format!(
+                    "import-iso {} failed: {}",
+                    os.id,
+                    out.failure()
+                ))),
+                Err(e) => Ok(tool_err(format!("import-iso could not run: {e}"))),
+            }
+        }
+
         // ── spaces ───────────────────────────────────────────────────────────
         ("spaces", "list") => match spaces::list(host).await {
             Ok(list) => Ok(tool_ok(as_json(&list))),
@@ -288,10 +359,30 @@ async fn dispatch(cfg: &Config, tool: &str, args: &Value) -> Result<Value, Strin
                 Ok(r) => r,
                 Err(e) => return Ok(tool_err(format!("cannot read that request: {e}"))),
             };
-            match spaces::create(host, &f, &req).await {
-                Ok(msg) => Ok(tool_ok(format!(
-                    "{msg}\nIt is defined but not started — call spaces start when you are ready."
-                ))),
+            match spaces::create(host, &f, &req, cfg.guest_hub.as_deref(), &cfg.leo_api_url).await {
+                Ok(created) => {
+                    if let (Some(plan), false) =
+                        (created.pairing.clone(), created.pairing_code.is_empty())
+                    {
+                        tokio::spawn(crate::guest_tools::finish_pairing(
+                            host.clone(),
+                            f,
+                            req.name.clone(),
+                            created.hub.clone(),
+                            plan,
+                            cfg.leo_api_url.clone(),
+                            created.pairing_code.clone(),
+                        ));
+                    }
+                    Ok(tool_ok(format!(
+                        "{}\nIt is defined but not started — call spaces start when you are ready.{}{}",
+                        created.message,
+                        created.admin_password.as_deref().map(|p| format!("\nLocal admin: leo / {p}")).unwrap_or_default(),
+                        if created.pairing_code.is_empty() { String::new() } else {
+                            format!("\nIts satellite is waiting on pairing code {} — an admin approves it in Settings → Devices (the app does this itself when a person clicks Create).", created.pairing_code)
+                        }
+                    )))
+                }
                 Err(e) => Ok(tool_err(e.to_string())),
             }
         }
@@ -453,8 +544,18 @@ mod tests {
             .map(|v| v.as_str().unwrap())
             .collect();
         for want in [
-            "list", "get", "start", "shutdown", "restart", "force_off",
-            "create", "delete", "assign_gpu", "release_gpu", "snapshot", "restore",
+            "list",
+            "get",
+            "start",
+            "shutdown",
+            "restart",
+            "force_off",
+            "create",
+            "delete",
+            "assign_gpu",
+            "release_gpu",
+            "snapshot",
+            "restore",
         ] {
             assert!(actions.contains(&want), "spaces is missing '{want}'");
         }
@@ -480,7 +581,18 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        assert_eq!(hactions, vec!["status", "plan", "apply", "gpus"]);
+        assert_eq!(
+            hactions,
+            vec![
+                "status",
+                "plan",
+                "apply",
+                "gpus",
+                "installers",
+                "fetch_iso",
+                "import_iso"
+            ]
+        );
     }
 
     /// Every run-state action in the schema must actually parse. The dispatch
@@ -498,8 +610,14 @@ mod tests {
             .collect();
         // The ones dispatch handles explicitly rather than through Action.
         let handled = [
-            "list", "get", "create", "delete", "assign_gpu", "release_gpu",
-            "snapshot", "restore",
+            "list",
+            "get",
+            "create",
+            "delete",
+            "assign_gpu",
+            "release_gpu",
+            "snapshot",
+            "restore",
         ];
         for a in &actions {
             if handled.contains(&a.as_str()) {
@@ -518,12 +636,20 @@ mod tests {
         let e = validate("spaces", "start", &json!({ "action": "start" })).unwrap_err();
         assert!(e.contains("name"), "{e}");
 
-        let e = validate("spaces", "snapshot", &json!({ "action": "snapshot", "name": "x" }))
-            .unwrap_err();
+        let e = validate(
+            "spaces",
+            "snapshot",
+            &json!({ "action": "snapshot", "name": "x" }),
+        )
+        .unwrap_err();
         assert!(e.contains("label"), "{e}");
 
-        let e = validate("spaces", "assign_gpu", &json!({ "action": "assign_gpu", "name": "x" }))
-            .unwrap_err();
+        let e = validate(
+            "spaces",
+            "assign_gpu",
+            &json!({ "action": "assign_gpu", "name": "x" }),
+        )
+        .unwrap_err();
         assert!(e.contains("gpu"), "{e}");
 
         let e = validate("spaces_host", "apply", &json!({ "action": "apply" })).unwrap_err();
@@ -531,8 +657,12 @@ mod tests {
 
         // An empty string is not a value. A domain called "" produces a
         // libvirt error about a domain, which sends the reader looking for one.
-        let e = validate("spaces", "start", &json!({ "action": "start", "name": "   " }))
-            .unwrap_err();
+        let e = validate(
+            "spaces",
+            "start",
+            &json!({ "action": "start", "name": "   " }),
+        )
+        .unwrap_err();
         assert!(e.contains("non-empty"), "{e}");
 
         // Reads need nothing.
@@ -609,11 +739,17 @@ mod tests {
     #[test]
     fn delete_keeps_the_disk_by_default() {
         let args = json!({ "action": "delete", "name": "win-cad" });
-        let keep = args.get("keep_disk").and_then(Value::as_bool).unwrap_or(true);
+        let keep = args
+            .get("keep_disk")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
         assert!(keep, "the default must be to keep the disk");
 
         let args = json!({ "action": "delete", "name": "win-cad", "keep_disk": false });
-        let keep = args.get("keep_disk").and_then(Value::as_bool).unwrap_or(true);
+        let keep = args
+            .get("keep_disk")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
         assert!(!keep, "but it has to be losable when asked explicitly");
     }
 

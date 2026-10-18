@@ -85,6 +85,36 @@ impl Output {
     }
 }
 
+/// The two ends of [`Host::tcp_pipe`]: a socket, or an ssh whose stdio is one.
+pub enum Pipe {
+    Tcp(tokio::net::TcpStream),
+    Ssh(tokio::process::Child),
+}
+
+impl Pipe {
+    /// Split into something to read from and something to write to, so a
+    /// caller can pump both directions at once.
+    pub fn split(
+        self,
+    ) -> (
+        Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+        Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+        Option<tokio::process::Child>,
+    ) {
+        match self {
+            Self::Tcp(stream) => {
+                let (r, w) = stream.into_split();
+                (Box::new(r), Box::new(w), None)
+            }
+            Self::Ssh(mut child) => {
+                let stdout = child.stdout.take().expect("piped");
+                let stdin = child.stdin.take().expect("piped");
+                (Box::new(stdout), Box::new(stdin), Some(child))
+            }
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum HostError {
     #[error("could not run `{command}` on {host}: {source}")]
@@ -118,7 +148,9 @@ impl Host {
             Some(h) if h == "local" || h == "localhost" || h == "127.0.0.1" => Self::Local,
             Some(h) => Self::Remote {
                 host: h,
-                user: user.filter(|u| !u.is_empty()).unwrap_or_else(|| "root".into()),
+                user: user
+                    .filter(|u| !u.is_empty())
+                    .unwrap_or_else(|| "root".into()),
                 port: port.unwrap_or(22),
                 key_path: key_path.filter(|k| !k.is_empty()),
             },
@@ -136,6 +168,54 @@ impl Host {
     /// deliberate trade: these commands are composed in this crate from
     /// validated parts, never from user text, and writing provisioning steps
     /// as argv vectors made them unreadable without making them safer.
+    /// Put a local file at `remote` on the host, as this process's account
+    /// there. A copy for a local host, `scp` with the same key for a remote
+    /// one — no shell quoting of file contents anywhere.
+    pub async fn upload(&self, local: &std::path::Path, remote: &str) -> Result<(), HostError> {
+        let fail = |e: std::io::Error| HostError::Spawn {
+            host: self.to_string(),
+            command: format!("upload {}", local.display()),
+            source: e,
+        };
+        match self {
+            Self::Local => {
+                tokio::fs::copy(local, remote).await.map_err(fail)?;
+                Ok(())
+            }
+            Self::Remote {
+                host,
+                user,
+                port,
+                key_path,
+            } => {
+                let mut c = Command::new("scp");
+                c.arg("-q")
+                    .arg("-o")
+                    .arg("BatchMode=yes")
+                    .arg("-o")
+                    .arg("StrictHostKeyChecking=accept-new")
+                    .arg("-P")
+                    .arg(port.to_string());
+                if let Some(key) = key_path {
+                    c.arg("-i").arg(key);
+                }
+                c.arg(local).arg(format!("{user}@{host}:{remote}"));
+                c.stdin(std::process::Stdio::null());
+                let out = c.output().await.map_err(fail)?;
+                if !out.status.success() {
+                    return Err(HostError::Spawn {
+                        host: self.to_string(),
+                        command: format!("scp {} → {remote}", local.display()),
+                        source: std::io::Error::other(
+                            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                        ),
+                    });
+                }
+                Ok(())
+            }
+        }
+    }
+
     pub async fn run(&self, command: &str) -> Result<Output, HostError> {
         self.run_with_timeout(command, DEFAULT_TIMEOUT).await
     }
@@ -179,6 +259,63 @@ impl Host {
         })
     }
 
+    /// A byte pipe to a TCP port on the host's loopback — what a guest's VNC
+    /// console is reached through.
+    ///
+    /// Remote hosts use `ssh -W`, which is ssh's own netcat: stdin and stdout
+    /// become the far end's `127.0.0.1:<port>` with nothing installed over
+    /// there and the same key the rest of this package already holds. A
+    /// guest's graphics listen on loopback only (see `NewSpace::command`), so
+    /// this is the one road to them, and it is authenticated end to end.
+    pub async fn tcp_pipe(&self, port: u16) -> Result<Pipe, HostError> {
+        match self {
+            Self::Local => {
+                let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .map_err(|e| HostError::Spawn {
+                        command: format!("connect 127.0.0.1:{port}"),
+                        host: self.to_string(),
+                        source: e,
+                    })?;
+                Ok(Pipe::Tcp(stream))
+            }
+            Self::Remote {
+                host,
+                user,
+                port: ssh_port,
+                key_path,
+            } => {
+                let mut c = Command::new("ssh");
+                c.arg("-o")
+                    .arg("BatchMode=yes")
+                    .arg("-o")
+                    .arg("StrictHostKeyChecking=accept-new")
+                    .arg("-o")
+                    .arg("ConnectTimeout=10")
+                    .arg("-o")
+                    .arg("ServerAliveInterval=30")
+                    .arg("-p")
+                    .arg(ssh_port.to_string());
+                if let Some(key) = key_path {
+                    c.arg("-i").arg(key);
+                }
+                c.arg("-W")
+                    .arg(format!("127.0.0.1:{port}"))
+                    .arg(format!("{user}@{host}"))
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .kill_on_drop(true);
+                let child = c.spawn().map_err(|e| HostError::Spawn {
+                    command: format!("ssh -W 127.0.0.1:{port}"),
+                    host: self.to_string(),
+                    source: e,
+                })?;
+                Ok(Pipe::Ssh(child))
+            }
+        }
+    }
+
     fn command_for(&self, command: &str) -> Command {
         match self {
             Self::Local => {
@@ -193,26 +330,112 @@ impl Host {
                 key_path,
             } => {
                 let mut c = Command::new("ssh");
-                c.arg("-o").arg("BatchMode=yes")
-                    .arg("-o").arg("StrictHostKeyChecking=accept-new")
-                    .arg("-o").arg("ConnectTimeout=10")
-                    .arg("-p").arg(port.to_string());
+                c.arg("-o")
+                    .arg("BatchMode=yes")
+                    .arg("-o")
+                    .arg("StrictHostKeyChecking=accept-new")
+                    .arg("-o")
+                    .arg("ConnectTimeout=10")
+                    .arg("-p")
+                    .arg(port.to_string());
                 if let Some(key) = key_path {
                     c.arg("-i").arg(key);
                 }
                 c.arg(format!("{user}@{host}"));
-                // The remote shell gets the command as a single argument, so
-                // the local shell never sees it and cannot expand it twice.
-                c.arg("bash").arg("-lc").arg(command);
+                // **ssh does not preserve argv boundaries.** It joins every
+                // remaining argument with a single space and hands the result
+                // to the remote *login shell*, which parses it again. So
+                // passing `bash`, `-lc`, `<command>` as three arguments does
+                // NOT deliver the command as one: the far side receives
+                //
+                //     bash -lc sudo -n /usr/local/bin/leo-spaces-admin install-packages
+                //
+                // and runs the command string `sudo` with the rest as
+                // positional parameters. Bare `sudo` prints its usage, which
+                // is what every remote Apply returned — "packages failed:
+                // usage: sudo -h | -K | -k | -V", a message about this bug
+                // wearing the clothes of a privilege problem.
+                //
+                // Quoting it here is what makes the comment above true. The
+                // remote shell unwraps one layer and `bash -lc` gets the whole
+                // command as a single word, exactly as the local arm does.
+                c.arg("bash").arg("-lc").arg(single_quote(command));
                 c
             }
         }
     }
 }
 
+/// Wrap `s` so a shell parses it back as one word.
+///
+/// POSIX single-quoting: everything inside `'...'` is literal, and the only
+/// thing that cannot appear is a single quote, which is closed, escaped and
+/// reopened (`'\''`). That covers every character a provisioning command can
+/// carry — the `vendor:device` pairs, the paths, the spaces — without needing
+/// to know which ones the far shell treats specially.
+fn single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **ssh flattens argv, and this is the test that says so.**
+    ///
+    /// Every remote Apply failed with `usage: sudo -h | -K | -k | -V` — sudo's
+    /// own usage, which reads like a privilege problem and is not one. ssh
+    /// joins its trailing arguments with spaces and hands the string to the
+    /// remote login shell, so `bash`, `-lc`, `sudo -n … install-packages` as
+    /// three arguments arrives as `bash -lc sudo -n … install-packages`: the
+    /// command string is `sudo` and the rest are positional parameters. Bare
+    /// `sudo` prints usage.
+    ///
+    /// Asserted on the argv rather than by running anything, because the bug
+    /// is entirely in how the command is handed over — it reproduces against
+    /// any host and no test should need one.
+    #[test]
+    fn a_remote_command_reaches_the_far_shell_as_one_word() {
+        let host = Host::Remote {
+            host: "192.168.0.100".into(),
+            user: "leo".into(),
+            port: 22,
+            key_path: Some("/home/leo/.ssh/id_ed25519".into()),
+        };
+        let cmd = host.command_for("sudo -n /usr/local/bin/leo-spaces-admin install-packages");
+        let argv: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+
+        let last = argv.last().expect("ssh is given a remote command");
+        assert_eq!(
+            last, "'sudo -n /usr/local/bin/leo-spaces-admin install-packages'",
+            "the remote command must be quoted; unquoted, ssh flattens it and the far \
+             shell runs `sudo` with the rest as positional parameters"
+        );
+        // And the shape around it: `bash -lc <quoted>` are the final three.
+        let tail = &argv[argv.len() - 3..];
+        assert_eq!(tail[0], "bash");
+        assert_eq!(tail[1], "-lc");
+    }
+
+    /// A command carrying a single quote must not end the quoting early — the
+    /// close/escape/reopen dance is the only part of POSIX single-quoting that
+    /// is not trivial, so it gets its own case.
+    #[test]
+    fn a_quote_inside_the_command_survives() {
+        assert_eq!(single_quote("echo hi"), "'echo hi'");
+        assert_eq!(single_quote("it's"), r#"'it'\''s'"#);
+        // Round-trip through a real shell: what comes back must be the input.
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!("printf %s {}", single_quote("a 'b' c")))
+            .output()
+            .expect("bash runs");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "a 'b' c");
+    }
 
     /// An absent host setting must mean *this box*, not a misconfiguration.
     ///
@@ -264,7 +487,10 @@ mod tests {
     /// than as a transport failure.
     #[tokio::test]
     async fn a_failing_command_is_output_not_error() {
-        let out = Host::Local.run("exit 3").await.expect("spawn should succeed");
+        let out = Host::Local
+            .run("exit 3")
+            .await
+            .expect("spawn should succeed");
         assert_eq!(out.status, 3);
         assert!(!out.ok());
     }
@@ -280,13 +506,25 @@ mod tests {
     /// operator can act on, which is why `failure()` falls back to the code.
     #[test]
     fn a_silent_failure_still_reports_its_code() {
-        let out = Output { status: 7, stdout: "".into(), stderr: "".into() };
+        let out = Output {
+            status: 7,
+            stdout: "".into(),
+            stderr: "".into(),
+        };
         assert_eq!(out.failure(), "exited 7");
 
-        let out = Output { status: 1, stdout: "said here".into(), stderr: "".into() };
+        let out = Output {
+            status: 1,
+            stdout: "said here".into(),
+            stderr: "".into(),
+        };
         assert_eq!(out.failure(), "said here");
 
-        let out = Output { status: 1, stdout: "ignored".into(), stderr: "the reason".into() };
+        let out = Output {
+            status: 1,
+            stdout: "ignored".into(),
+            stderr: "the reason".into(),
+        };
         assert_eq!(out.failure(), "the reason");
     }
 

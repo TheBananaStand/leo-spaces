@@ -14,6 +14,15 @@ use serde::Serialize;
 
 use crate::host::{Host, HostError};
 
+/// One more PCI function of a card — its HDMI audio, its USB-C controller.
+/// VFIO claims a group, so these go wherever the display function goes.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Function {
+    pub address: String,
+    pub ids: String,
+    pub driver: String,
+}
+
 /// A discrete graphics device, and whether it can be handed to one guest.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Gpu {
@@ -43,31 +52,120 @@ pub struct Gpu {
     /// True when the vendor is AMD or Intel *and* the device is the CPU's
     /// integrated graphics — the common "this is the only GPU" case.
     pub integrated: bool,
+    /// The card's other functions in the same IOMMU group. Bound and
+    /// attached together with the display: a group with one function left
+    /// on its host driver is "not viable" and the guest refuses to start.
+    pub functions: Vec<Function>,
 }
 
 impl Gpu {
-    /// Whether this card could be given to a guest exclusively.
-    ///
-    /// Three ways it cannot: the IOMMU is off, the group holds devices the
-    /// host needs, or it is the only display the host has. The first two are
-    /// hard; the third is a judgement, so it is reported separately rather
-    /// than folded in here.
-    pub fn passthrough_blockers(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        if self.iommu_group.is_none() {
-            out.push(
-                "the IOMMU is off, so no device can be isolated for a guest".to_string(),
-            );
+    /// Every `vendor:device` the card is made of — what `bind-vfio` takes.
+    pub fn all_ids(&self) -> Vec<&str> {
+        let mut v = vec![self.ids.as_str()];
+        for f in &self.functions {
+            if !v.contains(&f.ids.as_str()) {
+                v.push(f.ids.as_str());
+            }
         }
-        if !self.group_siblings.is_empty() {
+        v
+    }
+
+    /// Every PCI address the card is made of — what the guest is given.
+    pub fn all_addresses(&self) -> Vec<&str> {
+        std::iter::once(self.address.as_str())
+            .chain(self.functions.iter().map(|f| f.address.as_str()))
+            .collect()
+    }
+
+    /// Every function is vfio-pci's — the group is viable.
+    pub fn fully_bound(&self) -> bool {
+        self.driver == "vfio-pci" && self.functions.iter().all(|f| f.driver == "vfio-pci")
+    }
+
+    /// The functions still on their host driver, as "addr (driver)".
+    pub fn held_functions(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.driver != "vfio-pci" {
             out.push(format!(
-                "its IOMMU group also holds {} — VFIO claims the whole group, so those go to the guest too",
-                self.group_siblings.join(", ")
+                "{} ({})",
+                self.address,
+                if self.driver.is_empty() {
+                    "no driver"
+                } else {
+                    &self.driver
+                }
             ));
         }
-        if self.is_boot_vga {
+        for f in &self.functions {
+            if f.driver != "vfio-pci" {
+                out.push(format!(
+                    "{} ({})",
+                    f.address,
+                    if f.driver.is_empty() {
+                        "no driver"
+                    } else {
+                        &f.driver
+                    }
+                ));
+            }
+        }
+        out
+    }
+
+    /// The PCI device this address belongs to — everything but the function.
+    ///
+    /// `0000:01:00.1` and `0000:01:00.0` are two *functions* of one device:
+    /// the display and its HDMI audio. A discrete card is always several of
+    /// these, and newer ones add USB-C and UCSI functions too.
+    fn device_of(address: &str) -> &str {
+        match address.rfind('.') {
+            Some(dot) => &address[..dot],
+            None => address,
+        }
+    }
+
+    /// Group siblings that are a **different physical device**.
+    ///
+    /// VFIO claiming "the whole group" is exactly what you want when the group
+    /// is one card: a guest given a GPU wants its audio function too. Counting
+    /// those as foreign blocked passthrough on essentially every discrete GPU
+    /// — measured on an RTX A4000 whose only sibling was its own `…:00.1` —
+    /// which is the feature this package exists for.
+    pub fn foreign_siblings(&self) -> Vec<&str> {
+        let own = Self::device_of(&self.address);
+        self.group_siblings
+            .iter()
+            .map(String::as_str)
+            .filter(|s| Self::device_of(s) != own)
+            .collect()
+    }
+
+    /// Whether this card could be given to a guest exclusively.
+    ///
+    /// Three ways it cannot: the IOMMU is off, the group holds **another
+    /// device** the host needs, or it is the host's only display.
+    ///
+    /// `others` is every display device on the box, so the third can be
+    /// decided rather than guessed. It used to be a flat "is it boot_vga",
+    /// which on a server with a BMC refused the one card anybody would ever
+    /// pass through — the console there is the BMC and survives perfectly. A
+    /// single-GPU desktop still gets the refusal, because there the console
+    /// really does go dark.
+    pub fn passthrough_blockers(&self, others: &[Gpu]) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.iommu_group.is_none() {
+            out.push("the IOMMU is off, so no device can be isolated for a guest".to_string());
+        }
+        let foreign = self.foreign_siblings();
+        if !foreign.is_empty() {
+            out.push(format!(
+                "its IOMMU group also holds {} — VFIO claims the whole group, so those go to the guest too",
+                foreign.join(", ")
+            ));
+        }
+        if self.is_boot_vga && !others.iter().any(|g| g.address != self.address) {
             out.push(
-                "it is the host's own display — passing it through leaves the console dark"
+                "it is the host's only display — passing it through leaves the console dark"
                     .to_string(),
             );
         }
@@ -94,9 +192,7 @@ impl PackageManager {
         Some(match self {
             // --needed so a re-run is free rather than a reinstall.
             Self::Pacman => format!("sudo pacman -S --needed --noconfirm {list}"),
-            Self::Apt => format!(
-                "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y {list}"
-            ),
+            Self::Apt => format!("sudo DEBIAN_FRONTEND=noninteractive apt-get install -y {list}"),
             Self::Dnf => format!("sudo dnf install -y {list}"),
             Self::Unknown => return None,
         })
@@ -165,6 +261,16 @@ pub enum Privilege {
 }
 
 impl Privilege {
+    /// How the host is acted on, for the Host panel.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Root => "root",
+            Self::PasswordlessSudo => "passwordless sudo",
+            Self::Wrapper => "leo-spaces-admin (one sudoers rule)",
+            Self::None => "none — setup steps are copy-only",
+        }
+    }
+
     /// Wrap a *wrapper verb* so it actually runs with privilege.
     ///
     /// Only the wrapper's own closed verbs come through here. Arbitrary shell
@@ -186,6 +292,26 @@ impl Privilege {
 
 /// Where the root-owned wrapper lives once an admin has installed it.
 pub const WRAPPER: &str = "/usr/local/bin/leo-spaces-admin";
+
+/// One file in `/var/lib/leo-spaces/iso`, in whichever of its states.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct IsoFile {
+    /// The name without `.part`, so a download in flight and the image it
+    /// becomes are the same entry.
+    pub file: String,
+    pub size_mb: u64,
+    pub state: IsoState,
+    /// The helper's last word, when a download failed.
+    pub failure: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IsoState {
+    Ready,
+    Downloading,
+    Failed,
+}
 
 /// The photograph.
 #[derive(Debug, Clone, Serialize)]
@@ -228,6 +354,25 @@ pub struct Facts {
     /// The `default` libvirt network is defined and active — what a guest gets
     /// NAT and DHCP from before anyone configures a bridge.
     pub default_network_active: bool,
+    /// The package's own storage pool is defined and running.
+    pub pool_ready: bool,
+    /// The host firewall has been opened for guests: the snippet is written
+    /// and its unit is in force. (Leo OS drops a guest's DHCP and forwarding
+    /// by default.)
+    pub guest_net_open: bool,
+    /// The virtio-win driver ISO is in the package's media directory.
+    pub virtio_iso_present: bool,
+    /// Every installer image in the media directory, finished or not.
+    pub isos: Vec<IsoFile>,
+    /// `(os id, MB)` for each image waiting in the import directory.
+    pub staged: Vec<(String, u64)>,
+    /// The `vendor:device` ids the box's modprobe config hands to vfio-pci at
+    /// boot — what `bind-vfio` wrote, whether or not a reboot has happened.
+    pub vfio_ids: Vec<String>,
+    /// That config predates the current boot: the host has rebooted since it
+    /// was written, so a card still held by its own driver is a binding that
+    /// did not take, not one waiting for a reboot.
+    pub vfio_config_predates_boot: bool,
     /// The user libvirt commands will run as is in the `libvirt` group.
     pub in_libvirt_group: bool,
     pub guacd_reachable: bool,
@@ -339,14 +484,83 @@ else p libvirt_running 0; fi
 
 # OVMF lives in a different place on every distro, and Windows will not boot
 # without it. Checked by looking rather than by trusting the package name.
-if ls /usr/share/edk2/x64/OVMF_CODE*.fd /usr/share/edk2-ovmf/x64/OVMF_CODE*.fd \
-      /usr/share/OVMF/OVMF_CODE*.fd /usr/share/qemu/ovmf-x86_64-code.bin >/dev/null 2>&1; then
+#
+# ONE LOCATION AT A TIME, and that is the whole point. `ls a b c` exits
+# NON-ZERO when any one of its arguments is missing, even if the others are
+# there — and a box only ever has one distribution's layout, so the combined
+# form answered "absent" on every machine, however much OVMF was installed.
+# The packages step therefore stayed Pending forever after a successful
+# install, which nobody saw until the privileged half started working: before
+# that the step was Blocked and never ran at all.
+if ls /usr/share/edk2/x64/OVMF_CODE*.fd >/dev/null 2>&1 \
+  || ls /usr/share/edk2-ovmf/x64/OVMF_CODE*.fd >/dev/null 2>&1 \
+  || ls /usr/share/OVMF/OVMF_CODE*.fd >/dev/null 2>&1 \
+  || ls /usr/share/qemu/ovmf-x86_64-code.bin >/dev/null 2>&1; then
   p ovmf 1
 else p ovmf 0; fi
 
 if virsh --connect qemu:///system net-info default 2>/dev/null | grep -qi '^Active:.*yes'; then
   p default_net 1
 else p default_net 0; fi
+
+# The host firewall opened for guests — see the helper's open-guest-network.
+# The ruleset itself needs root to read; the file plus a live unit is what
+# can be seen from here, and the unit re-applies the file on every boot.
+if [ -s /etc/nftables.d/leo-spaces-guests.conf ] && systemctl is-active leo-spaces-guest-net.service >/dev/null 2>&1; then
+  p guest_net 1
+else p guest_net 0; fi
+
+# The storage pool, probed rather than assumed. The step that creates it used
+# to report `satisfied: false` unconditionally — with a comment saying that
+# reporting it pending on a host where it already exists "would be a lie", and
+# then telling exactly that lie. The cost was not cosmetic: `virtio` requires
+# `storage`, so a permanently-unsatisfied storage step left virtio permanently
+# unapplicable, and the setup list could never reach a finished state.
+if virsh --connect qemu:///system pool-info leo-spaces 2>/dev/null | grep -qi '^State:.*running'; then
+  p pool 1
+else p pool 0; fi
+
+# The driver ISO, for the same reason as the pool: the step that fetches it
+# reported pending forever, so a finished host showed an unfinished list.
+if [ -s /var/lib/leo-spaces/iso/virtio-win.iso ]; then p virtio_iso 1; else p virtio_iso 0; fi
+
+# Images fetched as leo and waiting for root to adopt them — keyed by OS id,
+# which is the file's stem in the import directory.
+for f in /var/lib/leo/spaces-import/*.iso; do
+  [ -e "$f" ] || continue
+  p staged "$(basename "$f" .iso)|$(( $(stat -c %s "$f" 2>/dev/null || echo 0) / 1048576 ))"
+done
+
+# Every installer image, finished or in flight. A `.part` is a download the
+# helper is still writing; a `.log` with neither is one that failed, and its
+# last line is why. The driver ISO is a step, not an installer, so it is
+# skipped here.
+for f in /var/lib/leo-spaces/iso/*.iso /var/lib/leo-spaces/iso/*.iso.part /var/lib/leo-spaces/iso/*.iso.log; do
+  [ -e "$f" ] || continue
+  name=$(basename "$f")
+  case "$name" in virtio-win.iso*) continue ;; esac
+  case "$name" in
+    *.iso)      p iso "$name|$(( $(stat -c %s "$f" 2>/dev/null || echo 0) / 1048576 ))|ready|" ;;
+    *.iso.part) p iso "${name%.part}|$(( $(stat -c %s "$f" 2>/dev/null || echo 0) / 1048576 ))|downloading|" ;;
+    *.iso.log)
+      base="${name%.log}"
+      if [ ! -e "/var/lib/leo-spaces/iso/$base" ] && [ ! -e "/var/lib/leo-spaces/iso/$base.part" ]; then
+        p iso "$base|0|failed|$(tail -n 1 "$f" 2>/dev/null | tr -d '|' | cut -c1-200)"
+      fi ;;
+  esac
+done
+
+# What bind-vfio has configured, and whether a reboot has happened since — the
+# difference between "reboot to finish" and "the binding did not take".
+vfio_ids=$(sed -n 's/^options vfio-pci ids=\([^ ]*\).*/\1/p' /etc/modprobe.d/leo-spaces-vfio.conf 2>/dev/null | head -1)
+p vfio_ids "${vfio_ids:-none}"
+vfio_stale=0
+if [ -n "$vfio_ids" ]; then
+  btime=$(awk '/^btime/ {print $2}' /proc/stat 2>/dev/null)
+  mtime=$(stat -c %Y /etc/modprobe.d/leo-spaces-vfio.conf 2>/dev/null)
+  if [ -n "$btime" ] && [ -n "$mtime" ] && [ "$mtime" -lt "$btime" ]; then vfio_stale=1; fi
+fi
+p vfio_predates_boot $vfio_stale
 
 id -nG 2>/dev/null | tr ' ' '\n' | grep -qx libvirt && p libvirt_group 1 || p libvirt_group 0
 
@@ -388,9 +602,20 @@ for dev in /sys/bus/pci/devices/*; do
   fi
   bootvga=0
   [ -r "$dev/boot_vga" ] && [ "$(cat "$dev/boot_vga" 2>/dev/null)" = "1" ] && bootvga=1
+  # The card's other functions: same bus and slot, in the same group. Each
+  # as addr=vendor:device=driver, so the plan can bind and attach them all.
+  functions=""
+  slot="${addr%.*}"
+  for s in /sys/bus/pci/devices/"$slot".*; do
+    sb=$(basename "$s")
+    [ "$sb" = "$addr" ] && continue
+    [ -L "$s/iommu_group" ] && [ "$(basename "$(readlink -f "$s/iommu_group")")" != "$group" ] && continue
+    fd=""; [ -L "$s/driver" ] && fd=$(basename "$(readlink -f "$s/driver")")
+    functions="${functions:+$functions,}$sb=$(sed s/^0x// "$s/vendor"):$(sed s/^0x// "$s/device")=$fd"
+  done
   name=$(lspci -s "$addr" 2>/dev/null | cut -d' ' -f2- | sed 's/^[^:]*: //')
-  printf 'gpu\t%s|%s:%s|%s|%s|%s|%s|%s\n' \
-    "$addr" "$vendor" "$device" "$driver" "$group" "$siblings" "$bootvga" "$name"
+  printf 'gpu\t%s|%s:%s|%s|%s|%s|%s|%s|%s\n' \
+    "$addr" "$vendor" "$device" "$driver" "$group" "$siblings" "$bootvga" "$functions" "$name"
 done
 "#;
 
@@ -470,6 +695,32 @@ pub async fn probe(host: &Host) -> Result<Facts, HostError> {
             "swtpm" => f.swtpm_installed = v == "1",
             "virtiofsd" => f.virtiofsd_installed = v == "1",
             "default_net" => f.default_network_active = v == "1",
+            "guest_net" => f.guest_net_open = v == "1",
+            "pool" => f.pool_ready = v == "1",
+            "virtio_iso" => f.virtio_iso_present = v == "1",
+            "iso" => {
+                if let Some(i) = parse_iso(v) {
+                    f.isos.push(i);
+                }
+            }
+            "staged" => {
+                let mut it = v.splitn(2, '|');
+                let id = it.next().unwrap_or("").trim();
+                if !id.is_empty() {
+                    f.staged.push((
+                        id.to_string(),
+                        it.next().and_then(|m| m.trim().parse().ok()).unwrap_or(0),
+                    ));
+                }
+            }
+            "vfio_ids" => {
+                f.vfio_ids = v
+                    .split(',')
+                    .filter(|s| !s.is_empty() && *s != "none")
+                    .map(str::to_string)
+                    .collect()
+            }
+            "vfio_predates_boot" => f.vfio_config_predates_boot = v == "1",
             "libvirt_group" => f.in_libvirt_group = v == "1",
             "guacd" => f.guacd_reachable = v == "1",
             "root" => is_root = v == "1",
@@ -502,15 +753,52 @@ pub async fn probe(host: &Host) -> Result<Facts, HostError> {
     Ok(f)
 }
 
-/// `addr|vendor:device|driver|group|siblings|bootvga|name`
+/// `file|size_mb|state|failure`
+fn parse_iso(raw: &str) -> Option<IsoFile> {
+    let parts: Vec<&str> = raw.splitn(4, '|').collect();
+    if parts.len() < 3 || parts[0].trim().is_empty() {
+        return None;
+    }
+    let state = match parts[2].trim() {
+        "ready" => IsoState::Ready,
+        "downloading" => IsoState::Downloading,
+        "failed" => IsoState::Failed,
+        _ => return None,
+    };
+    let failure = parts
+        .get(3)
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    Some(IsoFile {
+        file: parts[0].trim().to_string(),
+        size_mb: parts[1].trim().parse().unwrap_or(0),
+        state,
+        failure,
+    })
+}
+
+impl Facts {
+    /// What the host has of one installer file, if anything.
+    pub fn iso(&self, file: &str) -> Option<&IsoFile> {
+        self.isos.iter().find(|i| i.file == file)
+    }
+
+    /// The image is on the host, whole.
+    pub fn has_iso(&self, file: &str) -> bool {
+        self.iso(file).is_some_and(|i| i.state == IsoState::Ready)
+    }
+}
+
+/// `addr|vendor:device|driver|group|siblings|bootvga|functions|name`
 ///
 /// Fields are positional and pipe-separated, and the name comes last because
 /// it is the only one that can contain anything. `splitn` with the field count
 /// means a name with a pipe in it stays whole instead of shifting every field
 /// after it.
 fn parse_gpu(raw: &str) -> Option<Gpu> {
-    let parts: Vec<&str> = raw.splitn(7, '|').collect();
-    if parts.len() < 7 {
+    let parts: Vec<&str> = raw.splitn(8, '|').collect();
+    if parts.len() < 8 {
         return None;
     }
     let address = parts[0].trim();
@@ -527,7 +815,20 @@ fn parse_gpu(raw: &str) -> Option<Gpu> {
         .map(str::to_string)
         .collect();
     let is_boot_vga = parts[5].trim() == "1";
-    let name = parts[6].trim().to_string();
+    let functions = parts[6]
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| {
+            let mut it = s.splitn(3, '=');
+            Some(Function {
+                address: it.next()?.to_string(),
+                ids: it.next()?.to_string(),
+                driver: it.next().unwrap_or("").to_string(),
+            })
+        })
+        .collect();
+    let name = parts[7].trim().to_string();
 
     // Integrated graphics are identified by name rather than by vendor: AMD
     // and Intel both ship discrete cards too, and calling every AMD GPU
@@ -551,6 +852,7 @@ fn parse_gpu(raw: &str) -> Option<Gpu> {
         group_siblings,
         is_boot_vga,
         integrated,
+        functions,
     })
 }
 
@@ -587,6 +889,13 @@ pub fn probe_blank(host: &Host) -> Facts {
         swtpm_installed: false,
         virtiofsd_installed: false,
         default_network_active: false,
+        guest_net_open: false,
+        pool_ready: false,
+        virtio_iso_present: false,
+        isos: Vec::new(),
+        staged: Vec::new(),
+        vfio_ids: Vec::new(),
+        vfio_config_predates_boot: false,
         in_libvirt_group: false,
         guacd_reachable: false,
         privilege: Privilege::None,
@@ -607,7 +916,7 @@ mod tests {
     #[test]
     fn a_gpu_line_parses_with_punctuation_in_the_name() {
         let g = parse_gpu(
-            "0000:78:00.0|1002:13c0|amdgpu|12||1|VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Granite Ridge [Radeon Graphics]",
+            "0000:78:00.0|1002:13c0|amdgpu|12||1||VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Granite Ridge [Radeon Graphics]",
         )
         .expect("should parse");
         assert_eq!(g.address, "0000:78:00.0");
@@ -626,12 +935,18 @@ mod tests {
     #[test]
     fn a_discrete_card_is_not_called_integrated() {
         let g = parse_gpu(
-            "0000:01:00.0|10de:24b0|nvidia|15|0000:01:00.1|0|VGA compatible controller: NVIDIA Corporation GA104GL [RTX A4000]",
+            "0000:01:00.0|10de:24b0|nvidia|15|0000:01:00.1|0|0000:01:00.1=10de:228b=snd_hda_intel|VGA compatible controller: NVIDIA Corporation GA104GL [RTX A4000]",
         )
         .unwrap();
         assert!(!g.integrated);
         assert!(!g.is_boot_vga);
         assert_eq!(g.group_siblings, vec!["0000:01:00.1"]);
+        // The card's audio function rides along, with its own driver.
+        assert_eq!(g.functions.len(), 1);
+        assert_eq!(g.functions[0].ids, "10de:228b");
+        assert_eq!(g.functions[0].driver, "snd_hda_intel");
+        assert_eq!(g.all_ids(), vec!["10de:24b0", "10de:228b"]);
+        assert!(!g.fully_bound());
     }
 
     /// The blockers are the whole safety story for passthrough. Each one is a
@@ -649,12 +964,18 @@ mod tests {
             group_siblings: vec![],
             is_boot_vga: false,
             integrated: false,
+            functions: vec![],
         };
-        assert!(clean.passthrough_blockers().is_empty());
+        assert!(clean
+            .passthrough_blockers(std::slice::from_ref(&clean))
+            .is_empty());
 
         // IOMMU off.
-        let no_iommu = Gpu { iommu_group: None, ..clean.clone() };
-        let b = no_iommu.passthrough_blockers();
+        let no_iommu = Gpu {
+            iommu_group: None,
+            ..clean.clone()
+        };
+        let b = no_iommu.passthrough_blockers(std::slice::from_ref(&no_iommu));
         assert_eq!(b.len(), 1);
         assert!(b[0].contains("IOMMU is off"));
 
@@ -663,12 +984,116 @@ mod tests {
             group_siblings: vec!["0000:00:1f.2".into()],
             ..clean.clone()
         };
-        let b = shared.passthrough_blockers();
-        assert!(b[0].contains("0000:00:1f.2"), "must name the sibling: {b:?}");
+        let b = shared.passthrough_blockers(std::slice::from_ref(&shared));
+        assert!(
+            b[0].contains("0000:00:1f.2"),
+            "must name the sibling: {b:?}"
+        );
 
-        // The host's own display.
-        let boot = Gpu { is_boot_vga: true, ..clean.clone() };
-        assert!(boot.passthrough_blockers()[0].contains("console"));
+        // The host's ONLY display.
+        let boot = Gpu {
+            is_boot_vga: true,
+            ..clean.clone()
+        };
+        assert!(
+            boot.passthrough_blockers(std::slice::from_ref(&boot))[0].contains("console"),
+            "the only display must still be refused"
+        );
+    }
+
+    /// **A card's own audio function is not a foreign device.**
+    ///
+    /// `01:00.0` and `01:00.1` are two functions of one card — the display and
+    /// its HDMI audio — and VFIO claiming both is exactly what a guest wants.
+    /// Treating the sibling as foreign blocked passthrough on essentially
+    /// every discrete GPU, which is the feature this package is for. Measured
+    /// on an RTX A4000 whose only group member besides itself was `…:00.1`.
+    #[test]
+    fn a_cards_own_functions_are_not_a_blocker() {
+        let card = Gpu {
+            address: "0000:01:00.0".into(),
+            ids: "10de:24b0".into(),
+            name: "RTX A4000".into(),
+            driver: "nvidia".into(),
+            iommu_group: Some(29),
+            // Its own audio function, and a USB-C controller as newer cards have.
+            group_siblings: vec!["0000:01:00.1".into(), "0000:01:00.2".into()],
+            is_boot_vga: false,
+            integrated: false,
+            functions: vec![],
+        };
+        assert!(
+            card.foreign_siblings().is_empty(),
+            "same device, different functions: {:?}",
+            card.foreign_siblings()
+        );
+        assert!(
+            card.passthrough_blockers(std::slice::from_ref(&card))
+                .is_empty(),
+            "a whole card in its own group is passable"
+        );
+
+        // A genuinely different device in the group still blocks, and is named.
+        let with_foreign = Gpu {
+            group_siblings: vec!["0000:01:00.1".into(), "0000:e2:00.0".into()],
+            ..card.clone()
+        };
+        assert_eq!(with_foreign.foreign_siblings(), vec!["0000:e2:00.0"]);
+        let b = with_foreign.passthrough_blockers(std::slice::from_ref(&with_foreign));
+        assert!(b[0].contains("0000:e2:00.0"), "{b:?}");
+        assert!(
+            !b[0].contains("0000:01:00.1"),
+            "the card's own function must not be listed as in the way: {b:?}"
+        );
+    }
+
+    /// The console-goes-dark refusal is about the host having NO display left,
+    /// not about this card being the one it boots from.
+    ///
+    /// A server with a BMC is the case that matters: the only card worth
+    /// passing through is the boot VGA, and the console is the BMC, which
+    /// survives. The flat `is_boot_vga` test refused exactly that machine.
+    #[test]
+    fn the_boot_card_is_passable_when_the_host_keeps_another_display() {
+        let a4000 = Gpu {
+            address: "0000:01:00.0".into(),
+            ids: "10de:24b0".into(),
+            name: "RTX A4000".into(),
+            driver: "nvidia".into(),
+            iommu_group: Some(29),
+            group_siblings: vec!["0000:01:00.1".into()],
+            is_boot_vga: true,
+            integrated: false,
+            functions: vec![],
+        };
+        let bmc = Gpu {
+            address: "0000:e3:00.0".into(),
+            ids: "1a03:2000".into(),
+            name: "ASPEED Graphics Family".into(),
+            driver: "ast".into(),
+            iommu_group: Some(10),
+            group_siblings: vec!["0000:e2:00.0".into()],
+            is_boot_vga: false,
+            integrated: false,
+            functions: vec![],
+        };
+
+        // Alone, it is the only display and stays refused.
+        assert!(!a4000
+            .passthrough_blockers(std::slice::from_ref(&a4000))
+            .is_empty());
+
+        // With the BMC present, the console survives and the card is passable.
+        let both = vec![a4000.clone(), bmc.clone()];
+        assert!(
+            a4000.passthrough_blockers(&both).is_empty(),
+            "a boot card is passable when another display remains: {:?}",
+            a4000.passthrough_blockers(&both)
+        );
+
+        // And the BMC itself is still refused — a different device shares its group.
+        let b = bmc.passthrough_blockers(&both);
+        assert!(b[0].contains("0000:e2:00.0"), "{b:?}");
     }
 
     /// The IOMMU parameter differs by vendor, and setting the wrong one is a
@@ -676,7 +1101,10 @@ mod tests {
     #[test]
     fn iommu_params_match_the_cpu() {
         assert_eq!(CpuVendor::Amd.iommu_params(), &["amd_iommu=on", "iommu=pt"]);
-        assert_eq!(CpuVendor::Intel.iommu_params(), &["intel_iommu=on", "iommu=pt"]);
+        assert_eq!(
+            CpuVendor::Intel.iommu_params(),
+            &["intel_iommu=on", "iommu=pt"]
+        );
         // An unknown vendor still gets pass-through mode, which is harmless
         // and correct on both, rather than a guessed vendor parameter.
         assert_eq!(CpuVendor::Unknown.iommu_params(), &["iommu=pt"]);
@@ -685,11 +1113,18 @@ mod tests {
     #[test]
     fn an_unknown_package_manager_has_no_install_command() {
         assert!(PackageManager::Unknown.install(&["qemu-full"]).is_none());
-        let p = PackageManager::Pacman.install(&["libvirt", "qemu-full"]).unwrap();
+        let p = PackageManager::Pacman
+            .install(&["libvirt", "qemu-full"])
+            .unwrap();
         assert!(p.contains("--needed"), "a re-run must be free: {p}");
         assert!(p.contains("--noconfirm"));
-        let a = PackageManager::Apt.install(&["libvirt-daemon-system"]).unwrap();
-        assert!(a.contains("DEBIAN_FRONTEND=noninteractive"), "apt must not prompt: {a}");
+        let a = PackageManager::Apt
+            .install(&["libvirt-daemon-system"])
+            .unwrap();
+        assert!(
+            a.contains("DEBIAN_FRONTEND=noninteractive"),
+            "apt must not prompt: {a}"
+        );
     }
 
     /// `ready_for_guests` gates the whole UI, so it must require every piece a
@@ -706,9 +1141,21 @@ mod tests {
             ..probe_blank(&Host::Local)
         };
         assert!(base.ready_for_guests());
-        assert!(!Facts { ovmf_installed: false, ..base.clone() }.ready_for_guests());
-        assert!(!Facts { kvm_available: false, ..base.clone() }.ready_for_guests());
-        assert!(!Facts { libvirt_running: false, ..base.clone() }.ready_for_guests());
+        assert!(!Facts {
+            ovmf_installed: false,
+            ..base.clone()
+        }
+        .ready_for_guests());
+        assert!(!Facts {
+            kvm_available: false,
+            ..base.clone()
+        }
+        .ready_for_guests());
+        assert!(!Facts {
+            libvirt_running: false,
+            ..base.clone()
+        }
+        .ready_for_guests());
     }
 
     /// Every probe line must be a command the shell can actually run.
@@ -733,7 +1180,12 @@ mod tests {
         // Exit-2-style complaints land on stderr. A probe line that cannot be
         // parsed says so there, and nowhere else.
         let stderr = out.stderr.to_ascii_lowercase();
-        for complaint in ["invalid argument", "invalid option", "unrecognized option", "usage:"] {
+        for complaint in [
+            "invalid argument",
+            "invalid option",
+            "unrecognized option",
+            "usage:",
+        ] {
             assert!(
                 !stderr.contains(complaint),
                 "a probe line is malformed ({complaint}):\n{}",
@@ -802,13 +1254,23 @@ mod tests {
 
     #[test]
     fn status_distinguishes_not_installed_from_half_installed() {
-        let nothing = Facts { reachable: true, virt_supported: true, ..probe_blank(&Host::Local) };
+        let nothing = Facts {
+            reachable: true,
+            virt_supported: true,
+            ..probe_blank(&Host::Local)
+        };
         assert_eq!(nothing.status_label(), "Not installed");
 
-        let half = Facts { libvirt_installed: true, ..nothing.clone() };
+        let half = Facts {
+            libvirt_installed: true,
+            ..nothing.clone()
+        };
         assert_eq!(half.status_label(), "Needs setup");
 
-        let no_virt = Facts { virt_supported: false, ..nothing.clone() };
+        let no_virt = Facts {
+            virt_supported: false,
+            ..nothing.clone()
+        };
         assert_eq!(no_virt.status_label(), "No virtualisation");
     }
 }

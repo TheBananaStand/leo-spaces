@@ -59,8 +59,14 @@ fn the_entry_launches_the_binary_the_hub_builds() {
 #[test]
 fn the_published_source_is_pinned_to_a_full_commit() {
     let entry = read("store/registry-entry.json");
-    let rev = entry["descriptor"]["app"]["rev"].as_str().unwrap_or_default();
-    assert_eq!(rev.len(), 40, "app.rev must be a full commit sha, got '{rev}'");
+    let rev = entry["descriptor"]["app"]["rev"]
+        .as_str()
+        .unwrap_or_default();
+    assert_eq!(
+        rev.len(),
+        40,
+        "app.rev must be a full commit sha, got '{rev}'"
+    );
     assert!(
         rev.chars().all(|c| c.is_ascii_hexdigit()),
         "app.rev must be hex, got '{rev}'"

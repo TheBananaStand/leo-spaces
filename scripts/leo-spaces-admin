@@ -24,6 +24,14 @@ VERSION=1
 STATE_DIR=/var/lib/leo-spaces
 POOL=leo-spaces
 MODPROBE_CONF=/etc/modprobe.d/leo-spaces-vfio.conf
+# Sorts last among the drop-ins (mkinitcpio concatenates them after the main
+# file, version-sorted) and APPENDS, so a distribution drop-in that assigns
+# MODULES= cannot take vfio out of the image.
+MKINITCPIO_DROPIN=/etc/mkinitcpio.conf.d/zz-leo-spaces-vfio.conf
+# A mirror that stops sending must become a failure, not a `.part` that sits
+# at the same size forever under a curl nothing will ever reap: under 10 KB/s
+# for a minute is the end of that attempt (and --retry gets the next one).
+CURL_PATIENCE="--connect-timeout 20 --speed-limit 10240 --speed-time 60"
 VIRTIO_URL=https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso
 
 die() { printf 'leo-spaces-admin: %s\n' "$*" >&2; exit 1; }
@@ -158,18 +166,251 @@ v_add_group() {
 }
 
 # ── Windows virtio drivers ────────────────────────────────────────────────────
+# The primary volume descriptor is sector 16: a type byte at offset 32768,
+# then "CD001" at 32769..32773 — so the first 32774 bytes end on it.
+looks_like_iso() {
+  head -c 32774 "$1" 2>/dev/null | tail -c 5 | grep -q CD001
+}
+
+# The installers this helper may fetch, and from where. One line per OS:
+#   id|file|url|<address>            a name the distribution keeps current
+#   id|file|dir|<directory>|<pattern> a listing to read and the file to pick
+# This is the ONLY source of addresses root downloads from — the app names an
+# id, never a URL. It is the same table as src/catalog.rs, and the package's
+# tests hold the two equal (the_helpers_catalog_is_this_one).
+ISO_CATALOG='
+win2k25|win2k25.iso|url|https://go.microsoft.com/fwlink/?linkid=2293312
+win2k22|win2k22.iso|url|https://go.microsoft.com/fwlink/p/?linkid=2195280
+win2k19|win2k19.iso|url|https://go.microsoft.com/fwlink/p/?linkid=2195167
+ubuntu24.04|ubuntu-24.04-live-server-amd64.iso|dir|https://releases.ubuntu.com/24.04/|ubuntu-24\.04(\.[0-9]+)?-live-server-amd64\.iso
+ubuntu26.04|ubuntu-26.04-live-server-amd64.iso|dir|https://releases.ubuntu.com/26.04/|ubuntu-26\.04(\.[0-9]+)?-live-server-amd64\.iso
+debian13|debian-13-amd64-netinst.iso|dir|https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/|debian-13[0-9.]*-amd64-netinst\.iso
+fedora43|fedora-server-43-x86_64.iso|dir|https://download.fedoraproject.org/pub/fedora/linux/releases/43/Server/x86_64/iso/|Fedora-Server-dvd-x86_64-43-[0-9.]+\.iso
+archlinux|archlinux-x86_64.iso|url|https://geo.mirror.pkgbuild.com/iso/latest/archlinux-x86_64.iso
+rocky10|rocky-10-x86_64-minimal.iso|url|https://download.rockylinux.org/pub/rocky/10/isos/x86_64/Rocky-10-latest-x86_64-minimal.iso
+rocky9|rocky-9-x86_64-minimal.iso|url|https://download.rockylinux.org/pub/rocky/9/isos/x86_64/Rocky-9-latest-x86_64-minimal.iso
+almalinux10|almalinux-10-x86_64-minimal.iso|url|https://repo.almalinux.org/almalinux/10/isos/x86_64/AlmaLinux-10-latest-x86_64-minimal.iso
+opensuse16.0|opensuse-leap-16.0-x86_64.iso|dir|https://download.opensuse.org/distribution/leap/16.0/iso/|[A-Za-z-]*Leap-16\.0[^"<> ]*x86_64[^"<> ]*\.iso
+opensusetumbleweed|opensuse-tumbleweed-x86_64.iso|url|https://download.opensuse.org/tumbleweed/iso/openSUSE-Tumbleweed-DVD-x86_64-Current.iso
+freebsd15.0|freebsd-15.0-amd64-disc1.iso|url|https://download.freebsd.org/releases/amd64/amd64/ISO-IMAGES/15.0/FreeBSD-15.0-RELEASE-amd64-disc1.iso
+freebsd14.3|freebsd-14.3-amd64-disc1.iso|url|https://download.freebsd.org/releases/amd64/amd64/ISO-IMAGES/14.3/FreeBSD-14.3-RELEASE-amd64-disc1.iso
+'
+
+# Start fetching one installer from the catalog, detached. Returns at once:
+# a multi-gigabyte download must not live inside a request, and the first
+# virtio fetch died exactly that way. Progress is the `.part` beside the
+# destination, failure is the `.log` left there — the app reads both.
+v_fetch_iso() {
+  local id="${1:-}"
+  [ -n "$id" ] || die "fetch-iso needs an OS id from the catalog"
+  case "$id" in *[!a-z0-9.]*) die "not a catalog id: $id" ;; esac
+  local line
+  line=$(printf '%s\n' "$ISO_CATALOG" | awk -F'|' -v id="$id" '$1==id {print; exit}')
+  [ -n "$line" ] || die "$id is not an installer this helper can fetch — client Windows images are brought by hand"
+  local file kind a b
+  IFS='|' read -r _ file kind a b <<<"$line"
+  mkdir -p "$STATE_DIR/iso"
+  local dest="$STATE_DIR/iso/$file"
+  if [ -s "$dest" ]; then
+    say "$file is already on the host"
+    return
+  fi
+  if [ -e "$dest.part" ]; then
+    if pgrep -f -- "-o $dest.part" >/dev/null 2>&1; then
+      die "$file is already downloading"
+    fi
+    # Left by a download whose process is gone — a reboot, a kill. Start over.
+    rm -f "$dest.part"
+  fi
+  command -v curl >/dev/null 2>&1 || die "curl is not installed"
+
+  local url
+  if [ "$kind" = url ]; then
+    url="$a"
+  else
+    local name
+    name=$(curl -fsSL "$a" | grep -oE "$b" | sort -uV | tail -1) || true
+    [ -n "$name" ] || die "nothing at $a matches the catalog's pattern for $id — its address may be stale; put the image at $dest by hand"
+    url="${a}${name}"
+  fi
+  rm -f "$dest.log"
+  # setsid + nohup: a new session that ignores the hangup the sudo'd ssh
+  # sends when the caller's request ends. The log is removed on success so
+  # its presence means exactly one thing.
+  nohup setsid bash -c '
+    dest="$1"; url="$2"; patience="$3"
+    if curl -fsSL --retry 3 $patience -o "$dest.part" "$url" \
+       && head -c 32774 "$dest.part" | tail -c 5 | grep -q CD001; then
+      mv "$dest.part" "$dest" && rm -f "$dest.log"
+    else
+      echo "download of $url failed, or what came back is not an ISO 9660 image"
+      rm -f "$dest.part"
+    fi
+  ' _ "$dest" "$url" "$CURL_PATIENCE" >"$dest.log" 2>&1 </dev/null &
+  say "downloading $file from $url — the Installers panel shows progress"
+}
+
+# Where an installer the package fetched AS LEO waits to be adopted. Root
+# never takes an address from a request; it takes a file from here, by
+# catalog id, after checking it is an ISO. This is how a licensed image —
+# downloaded in a browser, copied from a Mac — reaches the root-owned media
+# directory without a root shell.
+IMPORT_DIR=/var/lib/leo/spaces-import
+
+# Adopt a staged installer: /var/lib/leo/spaces-import/<id>.iso becomes the
+# catalog's file for <id> under the media directory, root-owned. The catalog
+# itself is not consulted for the name: client Windows is not in
+# ISO_CATALOG (no address), so the destination is <id>.iso for those and the
+# catalog's file name for the rest.
+v_import_iso() {
+  local id="${1:-}"
+  [ -n "$id" ] || die "import-iso needs an OS id"
+  case "$id" in *[!a-z0-9.]*) die "not a catalog id: $id" ;; esac
+  local src="$IMPORT_DIR/$id.iso"
+  [ -f "$src" ] || die "nothing staged at $src"
+  [ -L "$src" ] && die "$src is a symlink — refusing"
+  # The staged file must be a plain file leo put there, not a device or a
+  # hardlink into something root owns.
+  [ "$(stat -c %U "$src")" = "leo" ] || die "$src is not leo's"
+  looks_like_iso "$src" || die "$src is not an ISO 9660 image"
+  local file
+  file=$(printf '%s\n' "$ISO_CATALOG" | awk -F'|' -v id="$id" '$1==id {print $2; exit}')
+  [ -n "$file" ] || file="$id.iso"
+  mkdir -p "$STATE_DIR/iso"
+  local dest="$STATE_DIR/iso/$file"
+  [ -e "$dest" ] && die "$file is already on the host"
+  # Same filesystem or not, end up with a root-owned copy and nothing left
+  # in the staging dir.
+  mv "$src" "$dest" 2>/dev/null || { cp "$src" "$dest" && rm -f "$src"; }
+  chown root:root "$dest"; chmod 0644 "$dest"
+  say "$file imported"
+}
+
+# The "Leo guest tools" CD a space is created with: the Leo satellite for
+# the guest's platform, its installer, and two text files naming the hub it
+# should pair with and the space's own name. Built per space (the name is in
+# it) from a staging directory leo fills — root takes files, never addresses —
+# into the root-owned media directory, as the other images are.
+#
+#   /var/lib/leo/spaces-import/guest-tools/<space>/   (leo writes)
+#     leo-satellited.exe, install-leo-satellite.ps1, leo-hub.txt, leo-name.txt
+#   /var/lib/leo-spaces/iso/guest-tools-<space>.iso   (root writes)
+v_build_guest_tools() {
+  local name="${1:-}"
+  [ -n "$name" ] || die "build-guest-tools needs a space name"
+  case "$name" in *[!a-zA-Z0-9_-]*) die "not a space name: $name" ;; esac
+  local src="$IMPORT_DIR/guest-tools/$name"
+  [ -d "$src" ] || die "nothing staged at $src"
+  [ "$(stat -c %U "$src")" = "leo" ] || die "$src is not leo's"
+  [ -f "$src/install-leo-satellite.ps1" ] || die "$src has no installer"
+  command -v xorrisofs >/dev/null 2>&1 || die "xorrisofs is not installed (package: libisoburn)"
+  mkdir -p "$STATE_DIR/iso"
+  local dest="$STATE_DIR/iso/guest-tools-$name.iso"
+  # Joliet + Rock Ridge so the names survive on Windows and on Linux guests
+  # alike; `-no-pad` keeps a 20 MB image 20 MB.
+  xorrisofs -quiet -J -R -V "LEO_GUEST_TOOLS" -o "$dest.part" "$src" || die "building $dest failed"
+  mv "$dest.part" "$dest"
+  # The CD can carry the guest's admin password and a satellite token, so it
+  # is readable by the emulator's account and nobody else — unlike the public
+  # installer images beside it.
+  local qg=libvirt-qemu
+  getent group "$qg" >/dev/null 2>&1 || qg=kvm
+  chown "root:$qg" "$dest"; chmod 0640 "$dest"
+  say "$dest built"
+}
+
+# Let guests on libvirt's `default` network get an address and reach out.
+#
+# Leo OS runs a firewall (`table inet leo-firewall` in /etc/nftables.conf)
+# whose input and forward chains both end in drop, and neither knows
+# virbr0: a guest's DHCP broadcast dies on input before dnsmasq hears it
+# ("Unidentified network"), and a guest with an address still cannot
+# forward out. libvirt adds its own table, but an accept there cannot undo a
+# drop here — nft drops a packet if any base chain on the hook drops it —
+# so the rules have to go INTO leo-firewall's chains, ahead of its drop.
+#
+# Hence `insert rule` (prepend), tagged with a comment so a re-run deletes
+# its own rules first and is idempotent, kept in /etc/nftables.d/ like the
+# VPN package's masquerade, and re-applied by a unit that is PartOf
+# nftables.service — that unit opens with `flush ruleset`, which takes
+# these rules with it on every firewall restart.
+GUEST_NET_CONF=/etc/nftables.d/leo-spaces-guests.conf
+GUEST_NET_UNIT=/etc/systemd/system/leo-spaces-guest-net.service
+GUEST_BRIDGE=virbr0
+GUEST_SUBNET=192.168.122.0/24
+
+v_open_guest_network() {
+  command -v nft >/dev/null 2>&1 || die "nft is not installed"
+  mkdir -p /etc/nftables.d
+  cat > "$GUEST_NET_CONF" <<EOF
+#!/usr/sbin/nft -f
+# Written by leo-spaces-admin. Guests on $GUEST_BRIDGE: DHCP and DNS from the
+# host, and forwarding out. Inserted ahead of leo-firewall's drops, and tagged
+# so open-guest-network can replace them. Not a table of its own: an accept
+# in another table cannot override a drop in this one.
+insert rule inet leo-firewall input iifname "$GUEST_BRIDGE" udp dport { 67, 53 } accept comment "leo-spaces guests"
+insert rule inet leo-firewall input iifname "$GUEST_BRIDGE" tcp dport { 53, 8420 } accept comment "leo-spaces guests"
+insert rule inet leo-firewall forward iifname "$GUEST_BRIDGE" ip saddr $GUEST_SUBNET accept comment "leo-spaces guests"
+insert rule inet leo-firewall forward oifname "$GUEST_BRIDGE" ct state established,related accept comment "leo-spaces guests"
+EOF
+  cat > "$GUEST_NET_UNIT" <<EOF
+[Unit]
+Description=Leo Spaces — open the guest network in the host firewall
+After=network-online.target nftables.service libvirtd.service
+Wants=network-online.target
+PartOf=nftables.service
+ConditionPathExists=$GUEST_NET_CONF
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/leo-spaces-admin apply-guest-network
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  # The unit does the applying, now and at every boot — `restart` so a
+  # re-run re-inserts the rules through the same path the boot uses, and
+  # the probe (file + active unit) agrees with what is in force.
+  systemctl enable leo-spaces-guest-net.service >/dev/null 2>&1 || true
+  systemctl restart leo-spaces-guest-net.service || die "leo-spaces-guest-net.service failed — journalctl -u leo-spaces-guest-net"
+  say "guest network open: DHCP/DNS to the host and forwarding out, for $GUEST_SUBNET on $GUEST_BRIDGE"
+}
+
+# The live half, also what the unit runs at boot. Removes this script's own
+# rules (by their comment) and inserts them afresh, so it is safe to run as
+# often as anyone likes. With no leo-firewall table there is nothing to open.
+apply_guest_network() {
+  if ! nft list table inet leo-firewall >/dev/null 2>&1; then
+    say "no leo-firewall table is loaded — nothing drops guest traffic here"
+    return 0
+  fi
+  local chain handle
+  for chain in input forward; do
+    for handle in $(nft -a list chain inet leo-firewall "$chain" 2>/dev/null | grep 'comment "leo-spaces guests"' | sed -n 's/.*# handle \([0-9]*\).*/\1/p'); do
+      nft delete rule inet leo-firewall "$chain" handle "$handle"
+    done
+  done
+  nft -f "$GUEST_NET_CONF"
+}
+
 v_fetch_virtio() {
   mkdir -p "$STATE_DIR/iso"
   local dest="$STATE_DIR/iso/virtio-win.iso"
+  # One download at a time: a second Apply while the first is still pulling
+  # would reopen the same .part with O_TRUNC underneath it.
+  exec 9>"$STATE_DIR/iso/.fetch.lock"
+  flock -n 9 || die "a virtio-win download is already running"
   if [ -s "$dest" ]; then
     say "virtio-win.iso already present"
     return
   fi
   command -v curl >/dev/null 2>&1 || die "curl is not installed"
-  curl -fsSL --retry 3 -o "$dest.part" "$VIRTIO_URL"
+  curl -fsSL --retry 3 $CURL_PATIENCE -o "$dest.part" "$VIRTIO_URL"
   # An ISO that is actually an error page is worse than no ISO: Windows setup
   # mounts it, finds no drivers, and the failure looks like broken storage.
-  if ! head -c 32776 "$dest.part" | tail -c 5 | grep -q CD001; then
+  if ! looks_like_iso "$dest.part"; then
     rm -f "$dest.part"
     die "what came back is not an ISO 9660 image — check the network entitlement"
   fi
@@ -296,11 +537,23 @@ v_bind_vfio() {
 # Written by leo-spaces-admin. Devices listed here are claimed by vfio-pci at
 # boot instead of their normal driver, so a guest can own them outright.
 options vfio-pci ids=$all
+# And claimed FIRST: whichever display or audio driver would otherwise take
+# one of them is made to wait for vfio-pci, so the id list above decides.
+softdep nvidia pre: vfio-pci
+softdep nouveau pre: vfio-pci
+softdep amdgpu pre: vfio-pci
+softdep radeon pre: vfio-pci
+softdep i915 pre: vfio-pci
+softdep xe pre: vfio-pci
+softdep ast pre: vfio-pci
+softdep snd_hda_intel pre: vfio-pci
 EOF
   say "vfio-pci will claim: $all"
 
   # The modules have to be in the initramfs, or the real driver binds first
   # and vfio-pci finds the device already taken.
+  local marker
+  marker=$(mktemp)
   if [ -f /etc/mkinitcpio.conf ]; then
     cp -a /etc/mkinitcpio.conf "$(backup_dir)/"
     local mods="vfio_pci vfio vfio_iommu_type1"
@@ -313,7 +566,19 @@ EOF
       sed -i "s|^MODULES=(\(.*\))|MODULES=(\1 $need)|" /etc/mkinitcpio.conf
       sed -i 's|^MODULES=( |MODULES=(|' /etc/mkinitcpio.conf
     fi
-    command -v mkinitcpio >/dev/null 2>&1 && mkinitcpio -P || die "mkinitcpio not found"
+    # The edit above is not enough on its own: /etc/mkinitcpio.conf.d/*.conf
+    # is concatenated AFTER the main file, and a distribution's own drop-in
+    # saying `MODULES=(amdgpu)` replaced the list wholesale — which is how an
+    # image was built with no vfio in it while this verb said REBOOT REQUIRED.
+    mkdir -p "$(dirname "$MKINITCPIO_DROPIN")"
+    cat > "$MKINITCPIO_DROPIN" <<EOF
+# Written by leo-spaces-admin. Appends, so a drop-in that assigns MODULES=
+# cannot drop these; named to sort last, so nothing assigns after it.
+MODULES+=(vfio_pci vfio vfio_iommu_type1)
+EOF
+    command -v mkinitcpio >/dev/null 2>&1 || die "mkinitcpio not found"
+    mkinitcpio -P
+    verify_initramfs_has_vfio "$marker"
   elif [ -d /etc/initramfs-tools ]; then
     for m in vfio_pci vfio vfio_iommu_type1; do
       grep -qx "$m" /etc/initramfs-tools/modules 2>/dev/null \
@@ -328,11 +593,64 @@ EOF
   else
     die "modprobe config written, but no initramfs generator found — rebuild it by hand"
   fi
-  say "REBOOT REQUIRED"
+  # Bind now, not just at next boot, wherever that is safe: a function whose
+  # driver is not the console's (the card's audio, a card nothing displays
+  # on) can be handed to vfio-pci live, and the guest can start without a
+  # reboot. The host's own display is left to the reboot — unbinding it
+  # live blanks the console.
+  modprobe vfio-pci 2>/dev/null || true
+  local pending=0 dev addr vd cur
+  for dev in /sys/bus/pci/devices/*; do
+    vd="$(sed s/^0x// "$dev/vendor" 2>/dev/null):$(sed s/^0x// "$dev/device" 2>/dev/null)"
+    case ",$all," in *",$vd,"*) ;; *) continue ;; esac
+    addr=$(basename "$dev")
+    cur=$(basename "$(readlink -f "$dev/driver" 2>/dev/null)" 2>/dev/null)
+    [ "$cur" = "vfio-pci" ] && continue
+    if [ "$(cat "$dev/boot_vga" 2>/dev/null)" = "1" ]; then
+      say "$addr is the host's display — it moves to vfio-pci at the next boot"
+      pending=1; continue
+    fi
+    echo vfio-pci > "$dev/driver_override" 2>/dev/null || true
+    [ -n "$cur" ] && echo "$addr" > "/sys/bus/pci/drivers/$cur/unbind" 2>/dev/null
+    echo "$addr" > /sys/bus/pci/drivers_probe 2>/dev/null
+    if [ "$(basename "$(readlink -f "$dev/driver" 2>/dev/null)" 2>/dev/null)" = "vfio-pci" ]; then
+      say "$addr ($vd) bound to vfio-pci now"
+    else
+      say "$addr ($vd) could not be rebound live — it moves at the next boot"
+      pending=1
+    fi
+  done
+  if [ "$pending" = 1 ]; then say "REBOOT REQUIRED"; else say "bound — no reboot needed"; fi
+}
+
+# The image mkinitcpio just wrote has to actually carry vfio_pci and the id
+# list, or the reboot this verb asks for changes nothing. Checked rather than
+# assumed, because the first time it was assumed it was wrong.
+verify_initramfs_has_vfio() {
+  local marker="$1" img found=0
+  if ! command -v lsinitcpio >/dev/null 2>&1; then
+    rm -f "$marker"
+    say "lsinitcpio not found — the rebuilt image was not checked"
+    return
+  fi
+  while IFS= read -r img; do
+    found=1
+    if ! lsinitcpio "$img" 2>/dev/null | grep -qE '(^|/)vfio[-_]pci\.ko'; then
+      rm -f "$marker"
+      die "$img was rebuilt but carries no vfio_pci module — something in /etc/mkinitcpio.conf.d assigns MODULES= after $MKINITCPIO_DROPIN"
+    fi
+    if ! lsinitcpio "$img" 2>/dev/null | grep -q "etc/modprobe.d/$(basename "$MODPROBE_CONF")"; then
+      rm -f "$marker"
+      die "$img carries vfio_pci but not $MODPROBE_CONF — the modconf hook is missing from HOOKS"
+    fi
+    say "$img carries vfio_pci and the id list"
+  done < <(find /boot /efi -maxdepth 3 -name 'initramfs-*.img' -newer "$marker" 2>/dev/null)
+  rm -f "$marker"
+  [ "$found" = 1 ] || die "mkinitcpio -P wrote no initramfs under /boot or /efi"
 }
 
 v_unbind_vfio() {
-  rm -f "$MODPROBE_CONF" /etc/dracut.conf.d/leo-spaces-vfio.conf
+  rm -f "$MODPROBE_CONF" "$MKINITCPIO_DROPIN" /etc/dracut.conf.d/leo-spaces-vfio.conf
   if [ -f /etc/mkinitcpio.conf ] && command -v mkinitcpio >/dev/null 2>&1; then
     mkinitcpio -P
   elif [ -d /etc/initramfs-tools ] && command -v update-initramfs >/dev/null 2>&1; then
@@ -359,7 +677,12 @@ case "${1:-}" in
   enable-iommu)     v_enable_iommu ;;
   bind-vfio)        v_bind_vfio "${2:-}" ;;
   unbind-vfio)      v_unbind_vfio ;;
+  fetch-iso)        v_fetch_iso "${2:-}" ;;
+  import-iso)       v_import_iso "${2:-}" ;;
+  build-guest-tools) v_build_guest_tools "${2:-}" ;;
+  open-guest-network) v_open_guest_network ;;
+  apply-guest-network) apply_guest_network ;;
   *)
-    die "unknown verb '${1:-}'. Known: version install-packages enable-daemon setup-network setup-storage add-group fetch-virtio enable-iommu bind-vfio unbind-vfio"
+    die "unknown verb '${1:-}'. Known: version install-packages enable-daemon setup-network setup-storage add-group fetch-virtio enable-iommu bind-vfio unbind-vfio fetch-iso import-iso build-guest-tools open-guest-network"
     ;;
 esac

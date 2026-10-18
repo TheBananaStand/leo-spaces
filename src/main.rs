@@ -45,10 +45,14 @@ use axum::Router;
 
 mod api;
 mod auth;
+mod catalog;
 mod config;
+mod console;
 mod error;
 mod facts;
+mod guest_tools;
 mod host;
+mod installers;
 mod mcp;
 mod provision;
 mod spaces;
@@ -73,8 +77,20 @@ pub fn build_router(state: AppState) -> Router {
     // runtime failure from code that type-checks.
     Router::new()
         .merge(api::router())
-        .route("/leo/ui/descriptor", axum::routing::get(ui::descriptor_handler))
+        .route(
+            "/leo/ui/descriptor",
+            axum::routing::get(ui::descriptor_handler),
+        )
         .route("/leo/ui/data", axum::routing::get(ui::data_handler))
+        // The guest's screen, in a window — see `console`. The hub offers a
+        // page load to this process and serves what it answers; noVNC's files
+        // are static and are served from the package's own assets.
+        .route("/console", axum::routing::get(console::index))
+        .route("/console/{name}", axum::routing::get(console::page))
+        .nest_service(
+            "/novnc",
+            tower_http::services::ServeDir::new(console::novnc_dir()),
+        )
         .with_state(state)
 }
 
@@ -94,7 +110,10 @@ pub fn build_router(state: AppState) -> Router {
 /// app does not get. `LEO_SPACES_LOG` overrides, and a by-hand run that
 /// matches neither simply logs to stderr.
 fn log_file() -> Option<std::fs::File> {
-    let path = match std::env::var("LEO_SPACES_LOG").ok().filter(|v| !v.is_empty()) {
+    let path = match std::env::var("LEO_SPACES_LOG")
+        .ok()
+        .filter(|v| !v.is_empty())
+    {
         Some(p) => std::path::PathBuf::from(p),
         None => {
             let exe = std::env::current_exe().ok()?;
@@ -180,8 +199,7 @@ async fn serve(cfg: Arc<config::Config>) {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], cfg.listen_port));
     tracing::info!(host = %cfg.host, "leo-spaces starting");
 
-    let app = build_router(AppState { cfg })
-        .layer(tower_http::trace::TraceLayer::new_for_http());
+    let app = build_router(AppState { cfg }).layer(tower_http::trace::TraceLayer::new_for_http());
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
