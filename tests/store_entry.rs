@@ -88,3 +88,41 @@ fn the_listed_version_is_the_crate_version() {
         .expect("Cargo.toml has a version");
     assert_eq!(entry["version"], version);
 }
+
+/// The helper digest in the entry is the digest of the helper that ships.
+///
+/// The hub checks `scripts/leo-spaces-admin` against
+/// `privileged_helper.sha256` before it will promote the script to root, and
+/// refuses the whole install when they differ. A pin commit once rewrote the
+/// first forty hex digits of every hash-shaped string in `descriptor.json`,
+/// which turned this field into a commit hash wearing the digest's tail —
+/// and `the_store_entry_carries_this_descriptor` shipped it faithfully,
+/// because the entry did equal the descriptor. Computed here with the same
+/// tool the error message tells an operator to run.
+#[test]
+fn the_helper_digest_is_the_helpers() {
+    let entry = read("store/registry-entry.json");
+    let declared = entry["descriptor"]["privileged_helper"]["sha256"]
+        .as_str()
+        .expect("the entry declares its helper's sha256");
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/leo-spaces-admin");
+    let out = std::process::Command::new("sha256sum")
+        .arg(&script)
+        .output()
+        .expect("sha256sum runs");
+    let actual = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    assert_eq!(
+        declared, actual,
+        "privileged_helper.sha256 is not the digest of scripts/leo-spaces-admin — \
+         every hub refuses the install; fix it with: sha256sum scripts/leo-spaces-admin"
+    );
+    let rev = entry["descriptor"]["app"]["rev"].as_str().unwrap_or_default();
+    assert!(
+        !declared.starts_with(rev),
+        "the helper digest begins with the pinned commit — a pin rewrote it"
+    );
+}
