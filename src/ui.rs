@@ -65,6 +65,8 @@ const DEFAULT_PAGE: &str = "spaces";
 const RAIL_WIDTH: u32 = 216;
 /// The pane gutter — LeoCode's, between panels and around them.
 const GUTTER: u32 = 12;
+/// Inside the rail's glass, around its rows.
+const RAIL_PADDING: u32 = 10;
 
 /// The narrowest a tile may be before the grid drops a column. One number,
 /// shared by the grid's column model and the art block inside the cell.
@@ -185,12 +187,20 @@ fn screen() -> Value {
         "sheet": new_space_sheet(),
         // `body`, not `children`: the renderers read a screen's one child from
         // `body` — see `a_screen_draws_from_body`.
+        // LeoCode's library, which is the standard every Mac surface is held
+        // to: the rail is a pane of its own at the glass rung, the faces are
+        // panes beside it, and everything is one gutter from everything else
+        // and from the window. The old shape had the rail bare against the
+        // window edge with a hairline for a wall, and the board's tiles
+        // riding the pane's border.
         "body": {
             "kind": "hstack",
-            "spacing": 0,
+            "spacing": GUTTER,
+            "padding": GUTTER,
+            "align": "top",
+            "fill": true,
             "children": [
                 rail(),
-                { "kind": "divider" },
                 spaces_face(),
                 settings_face()
             ]
@@ -200,13 +210,19 @@ fn screen() -> Value {
 
 /// The column of doors. One subject at the top — can this host run a guest —
 /// then the two faces, then the one verb that makes something new.
+///
+/// A `panel` with no name strip, at the rung LeoCode's own rail draws at:
+/// pure glass (`rung: "rail"`), where the default `surface` is the heavier
+/// region a page is *read* on. What names each stretch is its uppercase
+/// section heading, as in LeoCode and Flow.
 fn rail() -> Value {
     json!({
-        "kind": "vstack",
-        "spacing": 2,
-        "align": "leading",
+        "kind": "panel",
+        "label": "",
+        "rung": "rail",
         "width": RAIL_WIDTH,
-        "paddingV": 8,
+        "spacing": 2,
+        "padding": RAIL_PADDING,
         "children": [
             host_hero(),
             section_label("MACHINES", 14),
@@ -214,7 +230,7 @@ fn rail() -> Value {
                 "kind": "searchField",
                 "stateKey": "query",
                 "placeholder": "Search",
-                "width": RAIL_WIDTH - 20
+                "width": RAIL_WIDTH - 2 * RAIL_PADDING
             },
             tab_row("spaces", "Spaces", "macwindow", "space_count"),
             tab_row("settings", "Settings", "gearshape", "setup_count"),
@@ -240,7 +256,6 @@ fn host_hero() -> Value {
         "kind": "vstack",
         "spacing": 5,
         "align": "leading",
-        "paddingH": 10,
         "paddingV": 6,
         "children": [
             { "kind": "text", "style": "section-label", "value": "HYPERVISOR" },
@@ -268,7 +283,6 @@ fn host_hero() -> Value {
 fn section_label(label: &str, padding_top: u32) -> Value {
     json!({
         "kind": "hstack",
-        "paddingH": 10,
         "paddingTop": padding_top,
         "children": [{ "kind": "text", "style": "section-label", "value": label }]
     })
@@ -289,9 +303,11 @@ fn tab_row(value: &str, label: &str, icon: &str, count_bind: &str) -> Value {
 
 fn spaces_face() -> Value {
     json!({
-        // An unlabelled `panel` purely to fill the pane's width — `fill` is a
-        // height word and a bare vstack drew a narrow column. Its two bodies
-        // are the board and one machine's screen, and exactly one shows.
+        // A filling column — `fill` is both axes in `LeoBoxLayout`, and
+        // LeoCode's library puts its pane in exactly this — holding two
+        // panes, the board and one machine's screen, of which exactly one
+        // shows. The column supplies the AND with `tab` that a single-clause
+        // `visibleWhen` cannot say.
         //
         // ONE state key decides which, and that is the point. The first cut
         // set `console.name` *and* `tab`, and only one of the two ever stuck:
@@ -299,43 +315,33 @@ fn spaces_face() -> Value {
         // applied back onto the surface, and the re-seed races the second
         // write — so the pair came out as whichever won, differently each run.
         // A single key cannot race itself.
-        "kind": "panel",
-        "padding": 0,
-        "scroll": false,
+        "kind": "vstack",
+        "spacing": 0,
+        "fill": true,
         "visibleWhen": { "state": "tab", "equals": "spaces" },
         "children": [ board_body(), console_body() ]
     })
 }
 
-/// The board: every machine as a tile.
+/// The board: every machine as a tile, in a pane whose name strip is the
+/// heading and whose trailing edge is the count — the IDE shell's own
+/// strip, the way LeoCode's Projects pane wears "24 projects". The grid
+/// scrolls inside the pane with a fade at its foot, one gutter in from the
+/// pane's edge on every side. A grid's own `paddingH` is not a word
+/// `LeoGridLayout` reads, which is why the tiles were riding the border.
 fn board_body() -> Value {
     json!({
-        "kind": "vstack",
-        "spacing": 0,
-        "align": "leading",
+        "kind": "panel",
+        "label": "Spaces",
+        "trailing": { "kind": "text", "bind": "space_count_label", "style": "caption", "color": "muted", "hideWhenEmpty": true },
+        "padding": GUTTER,
         "visibleWhen": { "state": "console.name", "equals": "" },
         "children": [
-            {
-                "kind": "hstack",
-                "spacing": 10,
-                "align": "center",
-                "paddingH": GUTTER + 10,
-                "paddingTop": 16,
-                "paddingV": 10,
-                "children": [
-                    { "kind": "text", "value": "Spaces", "style": "title" },
-                    { "kind": "text", "bind": "space_count", "style": "title", "color": "muted" },
-                    { "kind": "spacer" }
-                ]
-            },
             {
                 "kind": "grid",
                 "bind": "rows",
                 "minWidth": TILE_MIN_WIDTH,
-                "spacing": 16,
-                "paddingH": GUTTER + 10,
-                "paddingV": 4,
-                "scrollV": true,
+                "spacing": GUTTER,
                 "filter": {
                     "field": "tab",
                     "equalsState": "tab",
@@ -469,25 +475,25 @@ fn space_tile() -> Value {
     })
 }
 
-/// One machine's screen, where the board was.
+/// One machine's screen, where the board was: a pane with no name strip
+/// and no inset, so the screen reaches the pane's edges.
 ///
-/// The panel above sets `scroll: false`, because a VNC surface is not a
-/// document — inside a scroll view it is handed an unbounded height and
-/// draws a sliver.
+/// `scroll: false`, because a VNC surface is not a document — inside a
+/// scroll view it is handed an unbounded height and draws a sliver.
 fn console_body() -> Value {
     json!({
-        "kind": "vstack",
+        "kind": "panel",
+        "label": "",
+        "padding": 0,
+        "scroll": false,
         "spacing": 0,
-        "align": "leading",
-        "fill": true,
         "visibleWhen": { "state": "console.name", "nonEmpty": true },
         "children": [
             {
                 "kind": "hstack",
                 "spacing": 10,
                 "align": "center",
-                "paddingH": GUTTER + 10,
-                "paddingTop": 14,
+                "paddingH": GUTTER,
                 "paddingV": 10,
                 "children": [
                     {
@@ -601,7 +607,7 @@ fn settings_face() -> Value {
     json!({
         "kind": "hstack",
         "spacing": GUTTER,
-        "padding": GUTTER,
+        "fill": true,
         "visibleWhen": { "state": "tab", "equals": "settings" },
         "children": [
             panel("Host setup", vec![
@@ -1070,6 +1076,13 @@ pub fn build_data(f: &Facts, plan: &Plan, spaces: &[Space], is_admin: bool) -> V
         // Counts show on the rail rows. The setup count is what is *left*, not
         // the total: a badge of 9 on a finished host reads as nine problems.
         "space_count": spaces.len().to_string(),
+        // The pane's trailing word. A sentence, as LeoCode's "24 projects",
+        // and nothing at all on an empty board — the empty state says it.
+        "space_count_label": match spaces.len() {
+            0 => String::new(),
+            1 => "1 machine".to_string(),
+            n => format!("{n} machines"),
+        },
         "setup_count": if setup_pending == 0 { String::new() } else { setup_pending.to_string() },
     })
 }
@@ -1705,7 +1718,14 @@ mod tests {
         // from the spaces face now rather than a detail pane, because there is
         // no pane: the board and the screen are two bodies of one face, and
         // the screen is reached by tapping a tile.
-        let face = screen()["body"]["children"][2].clone();
+        let body = screen()["body"].clone();
+        let face = body["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["visibleWhen"]["equals"] == "spaces")
+            .expect("the spaces face")
+            .clone();
         let mut routes = Vec::new();
         collect_prop(&face, "route", &mut routes);
         assert!(

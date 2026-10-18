@@ -112,9 +112,9 @@
         ]
       },
       "body": {
+        "align": "top",
         "children": [
           {
-            "align": "leading",
             "children": [
               {
                 "align": "leading",
@@ -151,7 +151,6 @@
                   }
                 ],
                 "kind": "vstack",
-                "paddingH": 10,
                 "paddingV": 6,
                 "spacing": 5
               },
@@ -164,7 +163,6 @@
                   }
                 ],
                 "kind": "hstack",
-                "paddingH": 10,
                 "paddingTop": 14
               },
               {
@@ -212,43 +210,17 @@
                 "kind": "spacer"
               }
             ],
-            "kind": "vstack",
-            "paddingV": 8,
+            "kind": "panel",
+            "label": "",
+            "padding": 10,
+            "rung": "rail",
             "spacing": 2,
             "width": 216
           },
           {
-            "kind": "divider"
-          },
-          {
             "children": [
               {
-                "align": "leading",
                 "children": [
-                  {
-                    "align": "center",
-                    "children": [
-                      {
-                        "kind": "text",
-                        "style": "title",
-                        "value": "Spaces"
-                      },
-                      {
-                        "bind": "space_count",
-                        "color": "muted",
-                        "kind": "text",
-                        "style": "title"
-                      },
-                      {
-                        "kind": "spacer"
-                      }
-                    ],
-                    "kind": "hstack",
-                    "paddingH": 22,
-                    "paddingTop": 16,
-                    "paddingV": 10,
-                    "spacing": 10
-                  },
                   {
                     "bind": "rows",
                     "empty": {
@@ -411,10 +383,7 @@
                     },
                     "kind": "grid",
                     "minWidth": 320,
-                    "paddingH": 22,
-                    "paddingV": 4,
-                    "scrollV": true,
-                    "spacing": 16,
+                    "spacing": 12,
                     "swipeActions": {
                       "trailing": [
                         {
@@ -540,15 +509,22 @@
                     }
                   }
                 ],
-                "kind": "vstack",
-                "spacing": 0,
+                "kind": "panel",
+                "label": "Spaces",
+                "padding": 12,
+                "trailing": {
+                  "bind": "space_count_label",
+                  "color": "muted",
+                  "hideWhenEmpty": true,
+                  "kind": "text",
+                  "style": "caption"
+                },
                 "visibleWhen": {
                   "equals": "",
                   "state": "console.name"
                 }
               },
               {
-                "align": "leading",
                 "children": [
                   {
                     "align": "center",
@@ -582,8 +558,7 @@
                       }
                     ],
                     "kind": "hstack",
-                    "paddingH": 22,
-                    "paddingTop": 14,
+                    "paddingH": 12,
                     "paddingV": 10,
                     "spacing": 10
                   },
@@ -601,8 +576,10 @@
                     "ref": "webPane"
                   }
                 ],
-                "fill": true,
-                "kind": "vstack",
+                "kind": "panel",
+                "label": "",
+                "padding": 0,
+                "scroll": false,
                 "spacing": 0,
                 "visibleWhen": {
                   "nonEmpty": true,
@@ -610,9 +587,9 @@
                 }
               }
             ],
-            "kind": "panel",
-            "padding": 0,
-            "scroll": false,
+            "fill": true,
+            "kind": "vstack",
+            "spacing": 0,
             "visibleWhen": {
               "equals": "spaces",
               "state": "tab"
@@ -1002,8 +979,8 @@
                 "spacing": 4
               }
             ],
+            "fill": true,
             "kind": "hstack",
-            "padding": 12,
             "spacing": 12,
             "visibleWhen": {
               "equals": "settings",
@@ -1011,8 +988,10 @@
             }
           }
         ],
+        "fill": true,
         "kind": "hstack",
-        "spacing": 0
+        "padding": 12,
+        "spacing": 12
       },
       "ephemeralState": [
         "creating",
