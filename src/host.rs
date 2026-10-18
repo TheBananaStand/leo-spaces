@@ -11,6 +11,8 @@
 //! written twice and tested once.
 
 use std::fmt;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use tokio::process::Command;
@@ -22,6 +24,73 @@ use tokio::process::Command;
 /// a hung `ssh` to a box that stopped answering would otherwise pin a request
 /// handler until the hub restarted.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(900);
+
+/// How long a *read* — the host probe, the guest inventory — may take.
+///
+/// Both answer in well under a second, and both sit on every page load, so
+/// the only way either reaches a minute is a host that stopped answering
+/// mid-connection. With one multiplexed ssh carrying every command, that is
+/// exactly the case a per-command `ConnectTimeout` no longer catches: a
+/// client attaches to a master whose peer has gone quiet and waits for the
+/// keepalive to notice. Reads give up here instead of pinning a page for the
+/// fifteen minutes a package install is allowed.
+pub const READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long an idle multiplexed connection is kept open after its last
+/// command, in seconds. A page load is two commands and an action is three
+/// or four, a few seconds apart, with a person between the bursts.
+const CONTROL_PERSIST_SECS: u32 = 120;
+
+/// Where ssh keeps the sockets its multiplexed connections are shared
+/// through — one per `user@host:port`, hashed by ssh itself (`%C`).
+///
+/// **Every remote command used to pay a full ssh handshake**: key exchange,
+/// authentication and a login shell, ~115 ms each from the work hub to its
+/// compute box, measured. A page load is two commands, so that was 230 ms of
+/// the 670 before anything rendered; the Enter presses that answer a Windows
+/// installer were drifting from the half-second cadence they claim to 615 ms.
+/// With a control master the second command costs 5 ms.
+///
+/// The directory must be private (a socket anybody can connect to is a
+/// shell on the host as this account) and the path short (a Unix socket
+/// path is capped at 108 bytes). `$XDG_RUNTIME_DIR` is both by construction;
+/// a box without one gets a 0700 directory under the temp dir, created here
+/// — and if something else owns a path by that name, multiplexing is simply
+/// not used rather than used through a directory this process did not make.
+fn control_dir() -> Option<&'static PathBuf> {
+    static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+    DIR.get_or_init(|| {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+        let base = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir())
+            .unwrap_or_else(std::env::temp_dir);
+        let me = std::fs::metadata("/proc/self").map(|m| m.uid()).ok()?;
+        let dir = base.join(format!("leo-spaces-ssh-{me}"));
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => {
+                tracing::warn!(
+                    "cannot make {}: {e} — ssh connections are not shared",
+                    dir.display()
+                );
+                return None;
+            }
+        }
+        // Whoever made it, it has to be ours and closed, or it is not used.
+        let meta = std::fs::symlink_metadata(&dir).ok()?;
+        if !meta.is_dir() || meta.uid() != me || meta.permissions().mode() & 0o077 != 0 {
+            tracing::warn!(
+                "{} is not a private directory of this account — ssh connections are not shared",
+                dir.display()
+            );
+            return None;
+        }
+        Some(dir)
+    })
+    .as_ref()
+}
 
 /// Where the guests run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +268,7 @@ impl Host {
                 if let Some(key) = key_path {
                     c.arg("-i").arg(key);
                 }
+                multiplex(&mut c);
                 c.arg(local).arg(format!("{user}@{host}:{remote}"));
                 c.stdin(std::process::Stdio::null());
                 let out = c.output().await.map_err(fail)?;
@@ -285,20 +355,7 @@ impl Host {
                 port: ssh_port,
                 key_path,
             } => {
-                let mut c = Command::new("ssh");
-                c.arg("-o")
-                    .arg("BatchMode=yes")
-                    .arg("-o")
-                    .arg("StrictHostKeyChecking=accept-new")
-                    .arg("-o")
-                    .arg("ConnectTimeout=10")
-                    .arg("-o")
-                    .arg("ServerAliveInterval=30")
-                    .arg("-p")
-                    .arg(ssh_port.to_string());
-                if let Some(key) = key_path {
-                    c.arg("-i").arg(key);
-                }
+                let mut c = ssh(*ssh_port, key_path.as_deref());
                 c.arg("-W")
                     .arg(format!("127.0.0.1:{port}"))
                     .arg(format!("{user}@{host}"))
@@ -329,18 +386,7 @@ impl Host {
                 port,
                 key_path,
             } => {
-                let mut c = Command::new("ssh");
-                c.arg("-o")
-                    .arg("BatchMode=yes")
-                    .arg("-o")
-                    .arg("StrictHostKeyChecking=accept-new")
-                    .arg("-o")
-                    .arg("ConnectTimeout=10")
-                    .arg("-p")
-                    .arg(port.to_string());
-                if let Some(key) = key_path {
-                    c.arg("-i").arg(key);
-                }
+                let mut c = ssh(*port, key_path.as_deref());
                 c.arg(format!("{user}@{host}"));
                 // **ssh does not preserve argv boundaries.** It joins every
                 // remaining argument with a single space and hands the result
@@ -364,6 +410,44 @@ impl Host {
             }
         }
     }
+}
+
+/// An `ssh` with the options every use here shares: non-interactive, a
+/// bounded connect, keepalives so a host that goes quiet is noticed within
+/// a minute rather than at the command's own timeout, and the connection
+/// shared through [`control_dir`] when there is one.
+fn ssh(port: u16, key_path: Option<&str>) -> Command {
+    let mut c = Command::new("ssh");
+    c.arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg("ConnectTimeout=10")
+        .arg("-o")
+        .arg("ServerAliveInterval=15")
+        .arg("-o")
+        .arg("ServerAliveCountMax=3")
+        .arg("-p")
+        .arg(port.to_string());
+    if let Some(key) = key_path {
+        c.arg("-i").arg(key);
+    }
+    multiplex(&mut c);
+    c
+}
+
+/// Share the connection through a control master — `auto`, so the first
+/// command opens it and every later one rides it, and a master that has
+/// gone away is replaced rather than waited on.
+fn multiplex(c: &mut Command) {
+    let Some(dir) = control_dir() else { return };
+    c.arg("-o")
+        .arg("ControlMaster=auto")
+        .arg("-o")
+        .arg(format!("ControlPath={}/%C", dir.display()))
+        .arg("-o")
+        .arg(format!("ControlPersist={CONTROL_PERSIST_SECS}"));
 }
 
 /// Wrap `s` so a shell parses it back as one word.
@@ -419,6 +503,89 @@ mod tests {
         let tail = &argv[argv.len() - 3..];
         assert_eq!(tail[0], "bash");
         assert_eq!(tail[1], "-lc");
+    }
+
+    /// Every remote command rides one shared connection.
+    ///
+    /// The handshake was ~115 ms per command, measured from the work hub to
+    /// its compute box, and a page load is two commands with the installer's
+    /// Enter presses twenty-two more. The argv is what carries the sharing,
+    /// so the argv is what is checked — and the directory the sockets live
+    /// in has to be this account's and closed to everyone else, because a
+    /// reachable control socket is a shell on the host.
+    #[test]
+    fn a_remote_command_rides_a_shared_private_connection() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let host = Host::Remote {
+            host: "192.168.0.100".into(),
+            user: "leo".into(),
+            port: 22,
+            key_path: None,
+        };
+        let cmd = host.command_for("true");
+        let argv: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let dir = control_dir().expect("a private socket directory can be made here");
+        assert!(argv.iter().any(|a| a == "ControlMaster=auto"), "{argv:?}");
+        assert!(
+            argv.iter()
+                .any(|a| *a == format!("ControlPath={}/%C", dir.display())),
+            "{argv:?}"
+        );
+        assert!(
+            argv.iter().any(|a| a.starts_with("ControlPersist=")),
+            "{argv:?}"
+        );
+        // Keepalives, so a master whose peer went quiet is noticed in under a
+        // minute instead of at the command's own timeout.
+        assert!(
+            argv.iter().any(|a| a == "ServerAliveInterval=15"),
+            "{argv:?}"
+        );
+
+        let meta = std::fs::metadata(dir).unwrap();
+        assert!(meta.is_dir());
+        assert_eq!(
+            meta.permissions().mode() & 0o777,
+            0o700,
+            "{}",
+            dir.display()
+        );
+        assert_eq!(
+            meta.uid(),
+            std::fs::metadata("/proc/self").unwrap().uid(),
+            "the socket directory belongs to this account"
+        );
+        // A socket path is capped at 108 bytes; ssh's %C is 40.
+        assert!(dir.as_os_str().len() + 1 + 40 < 108, "{}", dir.display());
+
+        // The console's byte pipe and the local arm are built the same way.
+        let pipe = {
+            let mut c = ssh(22, None);
+            c.arg("-W").arg("127.0.0.1:5900");
+            c
+        };
+        let pargv: Vec<String> = pipe
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(pargv.iter().any(|a| a == "ControlMaster=auto"));
+        let local = Host::Local.command_for("true");
+        assert_eq!(local.as_std().get_program(), "bash");
+    }
+
+    /// A read gives up long before an install would.
+    #[test]
+    fn a_read_times_out_sooner_than_an_install() {
+        assert!(READ_TIMEOUT < DEFAULT_TIMEOUT);
+        assert!(
+            READ_TIMEOUT >= Duration::from_secs(30),
+            "a slow host still answers"
+        );
     }
 
     /// A command carrying a single quote must not end the quoting early — the

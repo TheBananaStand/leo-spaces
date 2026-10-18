@@ -643,40 +643,49 @@ sudo -n /usr/local/bin/leo-spaces-admin version >/dev/null 2>&1 && p wrapper_ok 
 
 # One line per display device. Walking sysfs rather than parsing lspci output
 # because the IOMMU group and the bound driver are both only there.
+#
+# Shell builtins throughout — `read` from the sysfs file, `${x##*/}` for the
+# last path component, `${x#0x}` for the prefix — rather than `cat`, `basename`
+# and `sed` in subshells. Each of those is a fork and an exec, about a
+# millisecond apiece on the measured host, and the old loop spent thirty of
+# them per card. The probe as a whole is some 150 small commands and runs on
+# every page load, so forks are its cost; the output is byte-for-byte the same.
 for dev in /sys/bus/pci/devices/*; do
   [ -r "$dev/class" ] || continue
-  class=$(cat "$dev/class" 2>/dev/null)
+  class=""; read -r class < "$dev/class" 2>/dev/null || true
   case "$class" in
     0x0300*|0x0302*) ;;
     *) continue ;;
   esac
-  addr=$(basename "$dev")
-  vendor=$(cat "$dev/vendor" 2>/dev/null | sed 's/^0x//')
-  device=$(cat "$dev/device" 2>/dev/null | sed 's/^0x//')
+  addr="${dev##*/}"
+  vendor=""; read -r vendor < "$dev/vendor" 2>/dev/null || true; vendor="${vendor#0x}"
+  device=""; read -r device < "$dev/device" 2>/dev/null || true; device="${device#0x}"
   driver=""
-  [ -L "$dev/driver" ] && driver=$(basename "$(readlink -f "$dev/driver")")
+  if [ -L "$dev/driver" ]; then driver=$(readlink -f "$dev/driver"); driver="${driver##*/}"; fi
   group=""
-  [ -L "$dev/iommu_group" ] && group=$(basename "$(readlink -f "$dev/iommu_group")")
+  if [ -L "$dev/iommu_group" ]; then group=$(readlink -f "$dev/iommu_group"); group="${group##*/}"; fi
   siblings=""
   if [ -n "$group" ] && [ -d "/sys/kernel/iommu_groups/$group/devices" ]; then
     for s in /sys/kernel/iommu_groups/"$group"/devices/*; do
-      sb=$(basename "$s")
+      sb="${s##*/}"
       [ "$sb" = "$addr" ] && continue
       siblings="${siblings:+$siblings,}$sb"
     done
   fi
   bootvga=0
-  [ -r "$dev/boot_vga" ] && [ "$(cat "$dev/boot_vga" 2>/dev/null)" = "1" ] && bootvga=1
+  if [ -r "$dev/boot_vga" ]; then bv=""; read -r bv < "$dev/boot_vga" 2>/dev/null || true; [ "$bv" = "1" ] && bootvga=1; fi
   # The card's other functions: same bus and slot, in the same group. Each
   # as addr=vendor:device=driver, so the plan can bind and attach them all.
   functions=""
   slot="${addr%.*}"
   for s in /sys/bus/pci/devices/"$slot".*; do
-    sb=$(basename "$s")
+    sb="${s##*/}"
     [ "$sb" = "$addr" ] && continue
-    [ -L "$s/iommu_group" ] && [ "$(basename "$(readlink -f "$s/iommu_group")")" != "$group" ] && continue
-    fd=""; [ -L "$s/driver" ] && fd=$(basename "$(readlink -f "$s/driver")")
-    functions="${functions:+$functions,}$sb=$(sed s/^0x// "$s/vendor"):$(sed s/^0x// "$s/device")=$fd"
+    if [ -L "$s/iommu_group" ]; then sg=$(readlink -f "$s/iommu_group"); [ "${sg##*/}" != "$group" ] && continue; fi
+    fd=""; if [ -L "$s/driver" ]; then fd=$(readlink -f "$s/driver"); fd="${fd##*/}"; fi
+    fv=""; read -r fv < "$s/vendor" 2>/dev/null || true
+    fdv=""; read -r fdv < "$s/device" 2>/dev/null || true
+    functions="${functions:+$functions,}$sb=${fv#0x}:${fdv#0x}=$fd"
   done
   name=$(lspci -s "$addr" 2>/dev/null | cut -d' ' -f2- | sed 's/^[^:]*: //')
   printf 'gpu\t%s|%s:%s|%s|%s|%s|%s|%s|%s\n' \
@@ -688,7 +697,11 @@ done
 pub async fn probe(host: &Host) -> Result<Facts, HostError> {
     let mut f = probe_blank(host);
 
-    let out = match host.run(PROBE).await {
+    // A read, so it gets the read timeout — see `host::READ_TIMEOUT`.
+    let out = match host
+        .run_with_timeout(PROBE, crate::host::READ_TIMEOUT)
+        .await
+    {
         Ok(o) => o,
         Err(e @ HostError::Timeout { .. }) => {
             f.unreachable_reason = Some(e.to_string());

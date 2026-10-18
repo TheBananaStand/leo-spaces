@@ -175,11 +175,16 @@ fn valid_pci(addr: &str) -> Result<(), SpaceError> {
 /// Reading each domain with four separate `virsh` calls meant 4N round trips,
 /// which over SSH to a compute box with eight spaces was most of a second
 /// before anything rendered.
+///
+/// `ONLY` is the one hole in the script: [`list_probe`] fills it with either
+/// nothing (every domain) or a filter on one name, so reading one space does
+/// not inventory all of them — the console asks for one space twice on every
+/// open, and each `virsh` call inside is ~15 ms on the measured host.
 const LIST_PROBE: &str = r#"
 set -u
 V="virsh --connect qemu:///system"
 command -v virsh >/dev/null 2>&1 || { echo "NO_LIBVIRT"; exit 0; }
-$V list --all --name 2>/dev/null | while read -r name; do
+$V list --all --name 2>/dev/null ONLY | while read -r name; do
   [ -n "$name" ] || continue
   printf 'space\t%s\n' "$name"
   $V dominfo "$name" 2>/dev/null | while IFS= read -r line; do
@@ -202,9 +207,6 @@ $V list --all --name 2>/dev/null | while read -r name; do
   # One dumpxml, grepped several ways: the XML is the only place the assigned
   # devices and the graphics port both appear.
   xml=$($V dumpxml "$name" 2>/dev/null)
-  printf '%s\n' "$xml" \
-    | grep -oE "<address domain='0x[0-9a-f]+' bus='0x[0-9a-f]+' slot='0x[0-9a-f]+' function='0x[0-9a-f]+'/>" \
-    | head -8 > /tmp/.leo-spaces-hd.$$ || true
   # hostdev PCI addresses, reassembled into sysfs form.
   printf '%s\n' "$xml" | awk '
     /<hostdev/ { inhd=1 }
@@ -217,13 +219,17 @@ $V list --all --name 2>/dev/null | while read -r name; do
     }
     /<\/hostdev>/ { inhd=0 }
   ' 2>/dev/null
-  rm -f /tmp/.leo-spaces-hd.$$
   printf '%s\n' "$xml" | sed -n "s/.*<graphics type='\([a-z]*\)'.*port='\([0-9-]*\)'.*/graphics\t\1 \2/p" | head -1
   printf '%s\n' "$xml" | sed -n "s/.*<mac address='\([^']*\)'.*/mac\t\1/p" | head -1
   # domifaddr needs the guest agent or a DHCP lease; silence means no address,
-  # which is an ordinary state for a guest that is off.
-  { $V domifaddr "$name" --source lease 2>/dev/null; $V domifaddr "$name" --source agent 2>/dev/null; } \
-    | awk '/ipv4/ && $4 !~ /^127\./ { split($4, a, "/"); printf "ip\t%s\n", a[1]; exit }'
+  # which is an ordinary state for a guest that is off. The lease is asked
+  # first and the agent only when it had nothing: the agent call is the
+  # slowest in the loop, and a guest with a lease has already answered.
+  ip=$($V domifaddr "$name" --source lease 2>/dev/null \
+    | awk '/ipv4/ && $4 !~ /^127\./ { split($4, a, "/"); print a[1]; exit }')
+  [ -n "$ip" ] || ip=$($V domifaddr "$name" --source agent 2>/dev/null \
+    | awk '/ipv4/ && $4 !~ /^127\./ { split($4, a, "/"); print a[1]; exit }')
+  [ -n "$ip" ] && printf 'ip\t%s\n' "$ip"
   # The admin password this process made for the guest, from its own staging
   # directory on the host (leo's, 0600) — for the pane to show an admin.
   pw=/var/lib/leo/spaces-import/guest-tools/$name/admin-password.txt
@@ -231,9 +237,31 @@ $V list --all --name 2>/dev/null | while read -r name; do
 done
 "#;
 
+/// The inventory script for every domain, or for one.
+///
+/// The name is interpolated into shell, which is safe for exactly one
+/// reason: every caller has passed it through [`valid_name`], whose alphabet
+/// is letters, digits, dashes and underscores. The test
+/// `a_filtered_probe_names_one_domain_and_only_valid_names_reach_it` holds
+/// that together with this function.
+fn list_probe(only: Option<&str>) -> String {
+    match only {
+        Some(name) => LIST_PROBE.replace(" ONLY", &format!(" | grep -xF -- '{name}'")),
+        None => LIST_PROBE.replace(" ONLY", ""),
+    }
+}
+
 /// Read every space on the host.
 pub async fn list(host: &Host) -> Result<Vec<Space>, SpaceError> {
-    let out = host.run(LIST_PROBE).await?;
+    read(host, None).await
+}
+
+/// Run the inventory — all of it, or one domain's — and parse it. A read, so
+/// it gets the read timeout rather than the one a package install is allowed.
+async fn read(host: &Host, only: Option<&str>) -> Result<Vec<Space>, SpaceError> {
+    let out = host
+        .run_with_timeout(&list_probe(only), crate::host::READ_TIMEOUT)
+        .await?;
     if out.stdout.contains("NO_LIBVIRT") {
         return Err(SpaceError::NoLibvirt {
             host: host.to_string(),
@@ -337,9 +365,12 @@ fn pad_pci(raw: &str) -> Option<String> {
     ))
 }
 
+/// Read one space. The host is asked about that one domain, not all of them
+/// — see [`list_probe`] — and the name is validated before it goes anywhere
+/// near a shell.
 pub async fn get(host: &Host, name: &str) -> Result<Space, SpaceError> {
     valid_name(name)?;
-    list(host)
+    read(host, Some(name))
         .await?
         .into_iter()
         .find(|s| s.name == name)
@@ -1121,6 +1152,55 @@ pub async fn restore(host: &Host, name: &str, label: &str) -> Result<String, Spa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reading one space asks the host about one domain, and the name that
+    /// reaches the shell to do it can only be one `valid_name` let through.
+    ///
+    /// The two halves are one test because they are one safety argument: the
+    /// filter interpolates the name into a quoted shell word, which is safe
+    /// exactly while the alphabet stays letters, digits, dashes and
+    /// underscores. Widen `valid_name` and this fails before the shell does.
+    #[test]
+    fn a_filtered_probe_names_one_domain_and_only_valid_names_reach_it() {
+        let one = list_probe(Some("engineering"));
+        assert!(
+            one.contains("| grep -xF -- 'engineering' | while read"),
+            "{one}"
+        );
+        assert!(!one.contains("ONLY"), "the hole is filled");
+
+        let all = list_probe(None);
+        assert!(!all.contains("ONLY"), "the hole is filled");
+        assert!(!all.contains("grep -xF"), "no filter lists every domain");
+        assert!(
+            all.contains("$V list --all --name 2>/dev/null | while read"),
+            "{all}"
+        );
+
+        for bad in [
+            "it's",
+            "a b",
+            "x;rm -rf /",
+            "$(id)",
+            "`id`",
+            "a'|'b",
+            "Upper",
+            "",
+        ] {
+            assert!(valid_name(bad).is_err(), "{bad:?} must be refused");
+        }
+        for good in ["engineering", "test-lab_2", "a"] {
+            assert!(valid_name(good).is_ok(), "{good:?} is a space name");
+        }
+    }
+
+    /// The inventory never writes a scratch file: the old probe wrote and
+    /// removed one per domain whose contents nothing read.
+    #[test]
+    fn the_inventory_touches_no_scratch_file() {
+        assert!(!LIST_PROBE.contains("/tmp/"), "{LIST_PROBE}");
+        assert!(!LIST_PROBE.contains("rm -f"), "{LIST_PROBE}");
+    }
     use crate::facts::{Gpu, PackageManager, Privilege};
 
     fn host_facts() -> Facts {
