@@ -134,7 +134,7 @@ const PAGE: &str = r#"<!doctype html>
 <div id="status"><b>{{name}}</b><span id="msg">{{note}}</span></div>
 <div id="bar" class="hidden">
   <input id="send" type="text" autocomplete="off" spellcheck="false"
-         placeholder="Type text into this machine — a password, a command — then Enter">
+         placeholder="Paste or type text for this machine — a password, a command — then Enter">
   <button id="go" type="button">Send</button>
   <button id="cad" type="button" title="Ctrl+Alt+Delete">⌃⌥⌦</button>
 </div>

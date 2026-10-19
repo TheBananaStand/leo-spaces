@@ -39,12 +39,33 @@ function keysym(ch) {
 /// input stack drops a burst sent in one tick, and the symptom is a password
 /// missing its first few characters, which reads as the wrong password.
 async function type(rfb, text) {
+  await wake(rfb);
   for (const ch of text) {
     const k = keysym(ch);
     rfb.sendKey(k, null, true);
     rfb.sendKey(k, null, false);
     await new Promise((r) => setTimeout(r, 12));
   }
+}
+
+/// Wake a lock screen without typing into it.
+///
+/// A Windows lock screen takes the first key it sees to *dismiss itself* and
+/// swallows it — and the password box is still sliding in while the rest of
+/// a 20-character burst arrives, so it lands short by its first few characters
+/// and reads as "the wrong password". Seen on a real guest: the lock screen
+/// went away and the field stayed empty.
+///
+/// A bare Shift is the one key that is not a character: it dismisses the lock
+/// screen exactly as any key does, and at a password prompt — or anywhere else
+/// — it types nothing. The pause after it is the slide-in; measured against
+/// Windows 11, 600 ms is comfortably past it and well under what anyone notices
+/// on a paste.
+async function wake(rfb) {
+  const SHIFT_L = 0xffe1;
+  rfb.sendKey(SHIFT_L, null, true);
+  rfb.sendKey(SHIFT_L, null, false);
+  await new Promise((r) => setTimeout(r, 600));
 }
 
 if (note) {
