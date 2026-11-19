@@ -1,0 +1,61 @@
+[package]
+# The HOSTED shape of Spaces: `leo-package-host` wrapping the package built from
+# the `leo-spaces` library one directory up, as its own process — the account
+# `leo-pkg-spaces`, the unit `leo-package@spaces`, sockets under
+# /run/leo/packages. `scripts/build-pkg.sh` turns the binary into
+# `leo-spaces-<ver>-1-x86_64.pkg.tar.zst`.
+#
+# **Its own crate, its own lockfile, its own target — deliberately not a
+# workspace member of the root crate.** The root crate is the app shape, which
+# a hub clones and builds from git with `cargo build --release` and no Leo
+# checkout. Cargo resolves every path dependency in a manifest, optional or
+# not, so putting `leo-package-host` (a path into /opt/leo/leo) in the root
+# manifest — even behind a feature — would break that build on every box
+# without the checkout. Here it breaks nothing.
+name = "leo-spaces-host"
+# The package's version, and the pacman pkgver: `main_for_crate!` expands
+# `env!("CARGO_PKG_VERSION")` in THIS crate and the artifact reports it.
+# `the_host_carries_the_packages_version` keeps it equal to the root crate's.
+version = "0.2.0"
+edition = "2021"
+publish = false
+
+# An empty table makes this directory its own workspace root, so cargo does
+# not walk up to the root crate's manifest looking for one.
+[workspace]
+
+[[bin]]
+# What the unit template execs (`/usr/lib/leo/packages/leo-%i`) and what
+# `build-package-pkg.sh` checks the basename of. Same name as the root crate's
+# app-shape binary, which is fine: different crate, different target dir.
+name = "leo-spaces"
+path = "src/main.rs"
+
+[lib]
+name = "leo_spaces_host"
+path = "src/lib.rs"
+
+[dependencies]
+leo-spaces = { path = ".." }
+
+# PATH INTO THE CANONICAL CHECKOUT, the same interim `leo-shortcuts` carries:
+# the SDK is not published yet, and `leo-package-host` still links hub crates
+# (leo-package, leo-services), so it is not in the cut-out SDK payload
+# (`scripts/build-sdk-payload.py`, 566b4fef3 — leo-sdk* only). When an
+# SDK-clean host exists, these become that and nothing else here changes.
+leo-sdk-package = { path = "/opt/leo/leo/crates/leo-sdk-package" }
+leo-sdk-tools = { path = "/opt/leo/leo/crates/leo-sdk-tools" }
+leo-package-host = { path = "/opt/leo/leo/crates/leo-package-host", default-features = false }
+
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws"] }
+serde_json = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true
