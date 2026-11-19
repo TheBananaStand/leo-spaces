@@ -128,3 +128,36 @@ fn the_helper_digest_is_the_helpers() {
         "the helper digest begins with the pinned commit — a pin rewrote it"
     );
 }
+
+/// The hosted catalog row (`scripts/build-pkg.sh` writes it from the package
+/// it just built) names this crate's version and the pkgname the unit template
+/// execs, and its URL ends in the file the four § 3 fields name.
+#[test]
+fn the_hosted_entry_is_this_version_and_names_its_own_file() {
+    let entry = read("store/hosted-entry.json");
+    let cargo = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+    )
+    .unwrap();
+    let version = cargo
+        .lines()
+        .find_map(|l| l.strip_prefix("version = \""))
+        .and_then(|l| l.strip_suffix('"'))
+        .expect("Cargo.toml has a version");
+    assert_eq!(entry["name"], "spaces");
+    assert_eq!(entry["version"], version);
+    let h = &entry["hosted"];
+    assert_eq!(h["pkgname"], "leo-spaces");
+    let pkgver = h["version"].as_str().unwrap();
+    assert!(pkgver.starts_with(&format!("{version}-")), "{pkgver}");
+    let file = format!(
+        "leo-spaces-{pkgver}-{}.pkg.tar.zst",
+        h["arch"].as_str().unwrap()
+    );
+    assert!(h["url"].as_str().unwrap().ends_with(&format!("/{file}")));
+    assert_eq!(h["sha256"].as_str().unwrap().len(), 64);
+    // A hosted row carries no app block and no stdio server: those are the
+    // app shape's, and a row with both would install two copies.
+    assert!(entry.get("mcp").is_none());
+    assert!(entry["descriptor"].get("app").is_none());
+}

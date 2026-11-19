@@ -1,0 +1,38 @@
+{
+  "name": "spaces",
+  "label": "Spaces",
+  "description": "Run whole machines on a Leo hub — install the hypervisor, create Windows and Linux guests, and hand one a GPU.",
+  "icon": "macwindow.on.rectangle",
+  "version": "0.2.0",
+  "author": "TheBananaStand",
+  "homepage": "https://github.com/TheBananaStand/leo-spaces",
+  "category": "package",
+  "descriptor": {
+    "entitlements": {
+      "settings_read": [
+        "spaces_guest_hub",
+        "spaces_host",
+        "spaces_ssh_key",
+        "spaces_ssh_port",
+        "spaces_ssh_user"
+      ],
+      "sends": [
+        {
+          "classes": [
+            "credentials"
+          ],
+          "purpose": "Guests are defined and run on that machine; a Windows guest's product key and generated admin password are written into its unattended-install media there.",
+          "to": "The hypervisor host named in Settings (SSH)"
+        }
+      ]
+    }
+  },
+  "hosted": {
+    "pkgname": "leo-spaces",
+    "version": "0.2.0-1",
+    "arch": "x86_64",
+    "url": "https://github.com/TheBananaStand/leo-release/releases/download/packages/leo-spaces-0.2.0-1-x86_64.pkg.tar.zst",
+    "sha256": "ebd8bfe34d737ffe05d759ebb3f5cd7c5dab4746deb993de0eeb0f10d16a4d70",
+    "size_bytes": 6029711
+  }
+}
