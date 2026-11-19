@@ -29,8 +29,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use leo_sdk_package::{
-    Access, DataClass, DataFlow, FieldDef, FieldType, LeoPackage, PackageCategory,
-    PackageContext, PackageManifest, PackagePage, PackageState,
+    Access, DataClass, DataFlow, FieldDef, FieldType, LeoPackage, PackageCategory, PackageContext,
+    PackageManifest, PackagePage, PackageState,
 };
 use leo_sdk_tools::{RiskLevel, Tool, ToolDeadline, ToolDefinition, ToolResult};
 use serde_json::Value;
@@ -344,7 +344,7 @@ mod tests {
             .map(|f| {
                 (
                     f.key.to_string(),
-                    serde_json::to_value(&f.field_type)
+                    serde_json::to_value(f.field_type)
                         .unwrap()
                         .as_str()
                         .unwrap()
