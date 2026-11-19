@@ -32,7 +32,7 @@
     "version": "0.2.0-1",
     "arch": "x86_64",
     "url": "https://github.com/TheBananaStand/leo-release/releases/download/packages/leo-spaces-0.2.0-1-x86_64.pkg.tar.zst",
-    "sha256": "ebd8bfe34d737ffe05d759ebb3f5cd7c5dab4746deb993de0eeb0f10d16a4d70",
-    "size_bytes": 6029711
+    "sha256": "4be2743d135dbf75a1482e15456d290f75875f608384f33fa3336de3fcc4b6ce",
+    "size_bytes": 6027878
   }
 }
