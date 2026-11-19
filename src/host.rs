@@ -198,6 +198,10 @@ pub enum HostError {
         command: String,
         secs: u64,
     },
+    /// Not attempted: this process may not drive this host at all. Carries the
+    /// whole sentence, remedy included — see [`crate::hosted::LOCAL_REFUSED`].
+    #[error("{0}")]
+    Refused(&'static str),
 }
 
 impl Host {
@@ -230,6 +234,25 @@ impl Host {
         matches!(self, Self::Local)
     }
 
+    /// Refuse before spawning anything when this is the local machine and the
+    /// process is the hosted shape. One check at each of the three doors
+    /// ([`run_with_timeout`](Self::run_with_timeout), [`upload`](Self::upload),
+    /// [`tcp_pipe`](Self::tcp_pipe)) so no caller can reach the box by a path
+    /// that forgot to ask.
+    fn refuse_if_hosted_local(&self) -> Result<(), HostError> {
+        self.refusal(crate::hosted::is())
+    }
+
+    /// The decision itself, with the process-wide flag as an argument so a
+    /// test can ask it without flipping the flag under every other test in
+    /// the binary.
+    pub fn refusal(&self, hosted: bool) -> Result<(), HostError> {
+        if self.is_local() && hosted {
+            return Err(HostError::Refused(crate::hosted::LOCAL_REFUSED));
+        }
+        Ok(())
+    }
+
     /// Run a shell command on the host and collect its output.
     ///
     /// The command is handed to `bash -lc` in both modes, so a caller may use
@@ -246,6 +269,7 @@ impl Host {
             command: format!("upload {}", local.display()),
             source: e,
         };
+        self.refuse_if_hosted_local()?;
         match self {
             Self::Local => {
                 tokio::fs::copy(local, remote).await.map_err(fail)?;
@@ -295,6 +319,7 @@ impl Host {
         command: &str,
         timeout: Duration,
     ) -> Result<Output, HostError> {
+        self.refuse_if_hosted_local()?;
         let mut cmd = self.command_for(command);
         // Never inherit a tty: a provisioning step that stops to ask something
         // would hang until the timeout instead of failing with its question.
@@ -338,6 +363,7 @@ impl Host {
     /// guest's graphics listen on loopback only (see `NewSpace::command`), so
     /// this is the one road to them, and it is authenticated end to end.
     pub async fn tcp_pipe(&self, port: u16) -> Result<Pipe, HostError> {
+        self.refuse_if_hosted_local()?;
         match self {
             Self::Local => {
                 let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))

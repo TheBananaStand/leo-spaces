@@ -130,6 +130,40 @@ pub fn validate(tool: &str, action: &str, args: &Value) -> Result<(), String> {
     Ok(())
 }
 
+// ── The hosted shape's door ──────────────────────────────────────────────────
+
+/// Both tool schemas, MCP-shaped (`name`, `description`, `inputSchema`) —
+/// what the hosted shape turns into `ToolDefinition`s, from the same functions
+/// `tools/list` answers with, so the two shapes cannot advertise different
+/// tools.
+pub fn tool_schemas() -> [Value; 2] {
+    [spaces_tool(), host_tool()]
+}
+
+/// Run one tool call and answer `(text, is_error)` — the stdio server's
+/// `tools/call`, minus the JSON-RPC envelope. The hosted shape's `Tool`
+/// implementations are this and nothing else.
+pub async fn call(cfg: &Config, tool: &str, args: &Value) -> (String, bool) {
+    if tool != "spaces" && tool != "spaces_host" {
+        return (format!("unknown tool: '{tool}'"), true);
+    }
+    let result = match dispatch(cfg, tool, args).await {
+        Ok(v) => v,
+        Err(message) => tool_err(message),
+    };
+    let text = result["content"]
+        .as_array()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    (text, result["isError"].as_bool().unwrap_or(false))
+}
+
 // ── JSON-RPC plumbing ────────────────────────────────────────────────────────
 
 fn ok_response(id: &Value, result: Value) -> Value {

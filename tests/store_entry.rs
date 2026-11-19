@@ -120,7 +120,9 @@ fn the_helper_digest_is_the_helpers() {
         "privileged_helper.sha256 is not the digest of scripts/leo-spaces-admin — \
          every hub refuses the install; fix it with: sha256sum scripts/leo-spaces-admin"
     );
-    let rev = entry["descriptor"]["app"]["rev"].as_str().unwrap_or_default();
+    let rev = entry["descriptor"]["app"]["rev"]
+        .as_str()
+        .unwrap_or_default();
     assert!(
         !declared.starts_with(rev),
         "the helper digest begins with the pinned commit — a pin rewrote it"

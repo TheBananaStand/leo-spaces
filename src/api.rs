@@ -16,22 +16,40 @@ use crate::auth::{AdminCaller, Caller};
 use crate::error::Error;
 use crate::{facts, provision, spaces, AppState};
 
+/// The app-shape surface: [`routes`] at `/api`, where the hub's `/p/spaces/*`
+/// proxy (prefix stripped) delivers `/p/spaces/api/...`.
 pub fn router() -> Router<AppState> {
+    Router::new().nest("/api", routes())
+}
+
+/// The same routes **without** the `/api` prefix.
+///
+/// Two shapes reach them. In app shape [`router`] nests them at `/api`. Hosted,
+/// `leo-package-host` nests a package's own router at `/api` itself (its
+/// `router()` — `app.nest("/api", r)`), and the hub forwards `/p/spaces/<rest>`
+/// to the socket as `/<rest>` verbatim — so `/p/spaces/api/spaces` arrives
+/// here as `/spaces` in both shapes, and one table serves both.
+pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/api/health", get(health))
-        .route("/api/host", get(host))
-        .route("/api/host/plan", get(plan))
-        .route("/api/host/apply", post(apply))
-        .route("/api/host/installers", get(installers))
-        .route("/api/host/fetch-iso", post(fetch_iso))
-        .route("/api/host/import-iso", post(import_iso))
-        .route("/api/spaces", get(list).post(create))
-        .route("/api/spaces/{name}", axum::routing::delete(remove))
-        .route("/api/spaces/{name}/control", post(control))
-        .route("/api/spaces/{name}/gpu", post(gpu))
-        .route("/api/spaces/{name}/snapshot", post(snapshot))
-        .route("/api/spaces/{name}/guest-tools", post(guest_tools))
-        .route("/api/spaces/{name}/console/ws", get(crate::console::socket))
+        .route("/health", get(health))
+        .route("/host", get(host))
+        .route("/host/plan", get(plan))
+        .route("/host/apply", post(apply))
+        .route("/host/installers", get(installers))
+        .route("/host/fetch-iso", post(fetch_iso))
+        .route("/host/import-iso", post(import_iso))
+        .route("/spaces", get(list).post(create))
+        .route("/spaces/{name}", axum::routing::delete(remove))
+        .route("/spaces/{name}/control", post(control))
+        .route("/spaces/{name}/gpu", post(gpu))
+        .route("/spaces/{name}/snapshot", post(snapshot))
+        .route("/spaces/{name}/guest-tools", post(guest_tools))
+        .route("/spaces/{name}/console/ws", get(crate::console::socket))
+        // The console page, under `/api` so a hosted copy can serve it: the
+        // host answers only `/api/*`, `/leo/*` and declared mounts, so a bare
+        // `/console/{name}` would be a 404 there. App shape keeps the old
+        // `/console/{name}` beside this one for anything holding that link.
+        .route("/console/{name}", get(crate::console::page))
 }
 
 /// Liveness, no auth. The hub polls this to decide whether the subprocess came

@@ -182,6 +182,39 @@ impl Config {
         }
     }
 
+    /// The hosted entry point: the settings `leo-package-host` mirrored from
+    /// the hub (`ctx.get_setting`), keyed exactly as declared.
+    ///
+    /// No environment merge for the four host settings: a hosted unit's
+    /// environment is `/etc/leo-spaces/env`, which the operator does not put
+    /// settings in, and a value there silently overriding the one in Settings
+    /// is the confusion `fill_from`'s "environment wins" exists to allow only
+    /// for a person running the binary by hand.
+    ///
+    /// One default the app shape does not have: a remote host with no key named
+    /// uses [`HOSTED_SSH_KEY`] when that file is there, because that is where
+    /// the runbook puts the package's own key and the hosted process cannot
+    /// read any other (ProtectHome=yes; every other key belongs to some other
+    /// account).
+    pub fn from_settings_map(m: &BTreeMap<String, String>) -> Self {
+        let mut hs = HostSettings::from_map(m);
+        if hs.host.is_some()
+            && hs.ssh_key.is_none()
+            && std::path::Path::new(HOSTED_SSH_KEY).is_file()
+        {
+            hs.ssh_key = Some(HOSTED_SSH_KEY.to_string());
+        }
+        let mut cfg = Self::with_settings(hs);
+        // `with_settings` reads the guest hub from the environment only, which
+        // is the app shape's hand-off; hosted, the mirrored setting is it.
+        cfg.guest_hub = m
+            .get(SETTING_KEYS[4])
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .or(cfg.guest_hub);
+        cfg
+    }
+
     fn with_settings(settings: HostSettings) -> Self {
         Self {
             host: settings.into_host(),
@@ -217,6 +250,13 @@ pub const DEFAULT_PORT: u16 = 8530;
 /// looks like the generated one; [`TOKEN_PATH`] is the convention for this
 /// package.
 pub const TOKEN_PATH: &str = "/etc/leo-spaces/token";
+
+/// Where a hosted copy's own SSH key lives:
+/// `leo packages service install-credential spaces <file> --name ssh_key`
+/// places it there `root:leo-pkg-spaces 0640`. OpenSSH accepts a group-readable
+/// key that the reading account does not own (its "unprotected key" refusal
+/// is for a key owned by the caller), so 0640 root-owned is usable as-is.
+pub const HOSTED_SSH_KEY: &str = "/etc/leo-spaces/ssh_key";
 
 fn package_token() -> Option<String> {
     if let Some(t) = setting("LEO_PKG_TOKEN") {
@@ -585,6 +625,36 @@ mod tests {
     /// `Host::from_settings` decides what a remote is from the host field; the
     /// port falling back to the default is right, and the host disappearing
     /// because the port was junk would not be.
+    #[test]
+    fn the_hosted_config_reads_the_mirrored_settings() {
+        let m: BTreeMap<String, String> = [
+            ("spaces_host", "192.168.0.100"),
+            ("spaces_ssh_user", "leo"),
+            ("spaces_ssh_port", "2222"),
+            ("spaces_ssh_key", "/etc/leo-spaces/ssh_key"),
+            ("spaces_guest_hub", "10.0.8.100"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let cfg = Config::from_settings_map(&m);
+        assert_eq!(
+            cfg.host,
+            Host::Remote {
+                host: "192.168.0.100".into(),
+                user: "leo".into(),
+                port: 2222,
+                key_path: Some("/etc/leo-spaces/ssh_key".into()),
+            }
+        );
+        assert_eq!(cfg.guest_hub.as_deref(), Some("10.0.8.100"));
+        // Blank host is the local machine — which a hosted copy then refuses.
+        assert_eq!(
+            Config::from_settings_map(&BTreeMap::new()).host,
+            Host::Local
+        );
+    }
+
     #[test]
     fn a_junk_ssh_port_does_not_lose_the_host() {
         let s = HostSettings {

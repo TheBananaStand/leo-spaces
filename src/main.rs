@@ -41,58 +41,7 @@
 
 use std::sync::Arc;
 
-use axum::Router;
-
-mod api;
-mod auth;
-mod catalog;
-mod config;
-mod console;
-mod error;
-mod facts;
-mod guest_tools;
-mod host;
-mod installers;
-mod mcp;
-mod provision;
-mod spaces;
-mod ui;
-
-/// Shared state. Deliberately small: the host is the source of truth about
-/// guests, and anything cached here is a second answer that can disagree with
-/// `virsh`.
-#[derive(Clone)]
-pub struct AppState {
-    pub cfg: Arc<config::Config>,
-}
-
-/// The whole HTTP surface, assembled.
-///
-/// Its own function because axum decides a good deal of routing legality at
-/// *runtime* — a root `nest` panics on construction and compiles perfectly on
-/// the way there — so "does this router assemble" is a real question that only
-/// running the code answers.
-pub fn build_router(state: AppState) -> Router {
-    // `merge`, not `nest("/", …)`: axum 0.8 panics on a root nest, which is a
-    // runtime failure from code that type-checks.
-    Router::new()
-        .merge(api::router())
-        .route(
-            "/leo/ui/descriptor",
-            axum::routing::get(ui::descriptor_handler),
-        )
-        .route("/leo/ui/data", axum::routing::get(ui::data_handler))
-        // The guest's screen, in a window — see `console`. The hub offers a
-        // page load to this process and serves what it answers; noVNC's files
-        // are static and are served from the package's own assets.
-        .route("/console", axum::routing::get(console::index))
-        .route("/console/{name}", axum::routing::get(console::page))
-        .nest_service(
-            "/novnc",
-            tower_http::services::ServeDir::new(console::novnc_dir()),
-        )
-        .with_state(state)
-}
+use leo_spaces::{build_router, config, mcp, ui, AppState};
 
 /// Where the hub's Studio log pane reads an app package's output from, and so
 /// where this writes it.

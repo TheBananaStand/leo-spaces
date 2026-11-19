@@ -536,7 +536,7 @@ fn console_body() -> Value {
                         // dragged onto one.
                         "action": {
                             "kind": "openWindow",
-                            "route": "/p/spaces/console/{console.name}",
+                            "route": "/p/spaces/api/console/{console.name}",
                             "label": "{console.name}"
                         }
                     }
@@ -548,7 +548,7 @@ fn console_body() -> Value {
                 // No `height`: a native is greedy and takes what it is offered,
                 // which here is the rest of the pane. Stating one would pin the
                 // screen to a guessed size inside a surface that knows its own.
-                "props": { "route": "/p/spaces/console/{console.name}" },
+                "props": { "route": "/p/spaces/api/console/{console.name}" },
                 "fallback": {
                     "kind": "emptyState",
                     "icon": "display",
@@ -575,7 +575,7 @@ fn space_menu() -> Value {
           "action": { "kind": "setState", "key": "console.name", "value": "{title}" } },
         { "label": "Open in window", "icon": "macwindow.on.rectangle",
           "visibleWhen": { "field": "has_console", "equals": "1" },
-          "action": { "kind": "openWindow", "route": "/p/spaces/console/{title}", "label": "{title}" } },
+          "action": { "kind": "openWindow", "route": "/p/spaces/api/console/{title}", "label": "{title}" } },
         { "label": "Start", "icon": "play",
           "visibleWhen": { "field": "running", "equals": "off" },
           "action": { "method": "POST", "path": "/p/spaces/api/spaces/{title}/control",
@@ -1022,7 +1022,9 @@ fn sheet_label(label: &str) -> Value {
 
 // ──────────────────────────────────────────────────────────────────── data
 
-async fn data(s: &AppState, is_admin: bool) -> Value {
+/// Everything live for the one page. Public for the hosted shape, whose
+/// `ui_data` is this.
+pub async fn data(s: &AppState, is_admin: bool) -> Value {
     // The host probe and the guest inventory are independent reads of the
     // same box, so they go out together: run one after the other they were
     // 345 ms + 310 ms on the measured page load, and side by side they are the
@@ -1747,7 +1749,7 @@ mod tests {
         let mut routes = Vec::new();
         collect_prop(&face, "route", &mut routes);
         assert!(
-            routes.contains(&"/p/spaces/console/{console.name}".to_string()),
+            routes.contains(&"/p/spaces/api/console/{console.name}".to_string()),
             "{routes:?}"
         );
         // And the tile is what names the machine, in ONE write — two

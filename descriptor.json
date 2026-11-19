@@ -409,7 +409,7 @@
                           "action": {
                             "kind": "openWindow",
                             "label": "{title}",
-                            "route": "/p/spaces/console/{title}"
+                            "route": "/p/spaces/api/console/{title}"
                           },
                           "icon": "macwindow.on.rectangle",
                           "label": "Open in window",
@@ -555,7 +555,7 @@
                         "action": {
                           "kind": "openWindow",
                           "label": "{console.name}",
-                          "route": "/p/spaces/console/{console.name}"
+                          "route": "/p/spaces/api/console/{console.name}"
                         },
                         "icon": "macwindow.on.rectangle",
                         "kind": "button",
@@ -577,7 +577,7 @@
                     },
                     "kind": "native",
                     "props": {
-                      "route": "/p/spaces/console/{console.name}"
+                      "route": "/p/spaces/api/console/{console.name}"
                     },
                     "ref": "webPane"
                   }
