@@ -167,6 +167,43 @@ the machines" and "may change how the box boots" are different grants.
 somebody's work on it is not deleted as a side effect of removing a VM
 definition.
 
+## The hosted shape (`host/`, branch `hosted`)
+
+Spaces also builds as a **hosted** Leo package: `host/` is its own crate (own
+lockfile, own target, *not* a workspace member of this one) that wraps the
+`leo-spaces` library in `leo-package-host`. Installed from a pacman package it
+runs as the account `leo-pkg-spaces` under `leo-package@spaces.service`, on the
+two sockets systemd hands it under `/run/leo/packages/` — no port, no hand-added
+`mcp_servers` row, no git clone and build on the hub.
+
+What changes:
+
+- **Remote host only.** The unit is `NoNewPrivileges=yes`, `ProtectHome=yes`, no
+  libvirt group: it cannot `sudo leo-spaces-admin` or reach a local libvirtd. With
+  `spaces_host` blank, every host operation is refused with a sentence naming the
+  remedy (`leo_spaces::hosted::LOCAL_REFUSED`). To virtualise on the hub itself,
+  keep using the app shape there.
+- **Its own SSH key**, not the hub's: `/etc/leo-spaces/ssh_key`
+  (`root:leo-pkg-spaces 0640`), placed with
+  `leo packages service install-credential spaces <file> --name ssh_key` and
+  authorised on the hypervisor host for the account in `spaces_ssh_user`. A blank
+  `spaces_ssh_key` defaults to that path when the file exists.
+- **Tools are `spaces` and `spaces_host`** — the hub does not prefix a hosted
+  package's unix-socket MCP server, so `mcp_spaces_spaces` /
+  `mcp_spaces_spaces_host` (the stdio bridge's names) go away.
+- **The console link is `/p/spaces/api/console/<name>`** in both shapes (the host
+  serves only `/api/*`, `/leo/*` and declared mounts). The console WebSocket is
+  bridged over the socket by the hub (`WsUpstream::Unix`, Leo 2026-11-17).
+
+Build and package (on a Leo hub bare `cargo` is refused — route it):
+
+```bash
+cd /opt/leo/leo && leo check build --release -p leo-spaces-host \
+    --manifest-path ~/leo-spaces/host/Cargo.toml
+bash ~/leo-spaces/scripts/build-pkg.sh        # → target/pkg/leo-spaces-<ver>-1-x86_64.pkg.tar.zst
+                                              #   + store/hosted-entry.json (§ 3 `hosted` block)
+```
+
 ## How it runs: a fixed port, and why
 
 A descriptor, not a web bundle: `GET /leo/ui/descriptor` returns a tree the Mac
