@@ -3,7 +3,7 @@
   "label": "Spaces",
   "description": "Run whole machines on a Leo hub — install the hypervisor, create Windows and Linux guests, and hand one a GPU.",
   "icon": "macwindow.on.rectangle",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "TheBananaStand",
   "homepage": "https://github.com/TheBananaStand/leo-spaces",
   "category": "package",

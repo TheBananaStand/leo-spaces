@@ -1,6 +1,6 @@
 [package]
 name = "leo-spaces"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Install and run a hypervisor on a Leo hub or compute machine, and give Leo full control of the guests."
 

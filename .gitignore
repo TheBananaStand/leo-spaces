@@ -1,4 +1,5 @@
 /target
+/host/target
 *.db
 *.db-wal
 *.db-shm
